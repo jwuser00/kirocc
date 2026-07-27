@@ -24,6 +24,47 @@ func TestResolve(t *testing.T) {
 			wantAnthropicModel: "claude-opus-4-8[1m]",
 		},
 		{
+			// Claude Code sends this as its small/fast model. Forwarding it
+			// verbatim gets rejected upstream with INVALID_MODEL_ID.
+			name:               "dated haiku id resolves to kiro sku",
+			model:              "claude-haiku-4-5-20251001",
+			wantKiroModel:      "claude-haiku-4.5",
+			wantContextWindow:  DefaultContextWindowSize,
+			wantAnthropicModel: "claude-haiku-4.5",
+		},
+		{
+			name:               "dated sonnet id resolves to kiro sku",
+			model:              "claude-sonnet-4-5-20250929",
+			wantKiroModel:      "claude-sonnet-4.5",
+			wantContextWindow:  DefaultContextWindowSize,
+			wantAnthropicModel: "claude-sonnet-4.5",
+		},
+		{
+			name:               "dated id with 1m suffix opts into thinking",
+			model:              "claude-sonnet-4-5-20250929[1m]",
+			wantKiroModel:      "claude-sonnet-4.5-1m",
+			wantThinking:       true,
+			wantContextWindow:  ThinkingContextWindowSize,
+			wantAnthropicModel: "claude-sonnet-4.5[1m]",
+		},
+		{
+			// The dated form must not shadow an explicit mapping.
+			name:               "explicit env mapping wins over normalization",
+			envMappings:        `[{"anthropic":"claude-haiku-4-5-20251001","kiro":"claude-opus-4.5"}]`,
+			model:              "claude-haiku-4-5-20251001",
+			wantKiroModel:      "claude-opus-4.5",
+			wantContextWindow:  DefaultContextWindowSize,
+			wantAnthropicModel: "claude-haiku-4-5-20251001",
+		},
+		{
+			// A date-like suffix that is not 8 digits must not be stripped.
+			name:               "unknown claude model still passes through verbatim",
+			model:              "claude-future-9-9-2026",
+			wantKiroModel:      "claude-future-9-9-2026",
+			wantContextWindow:  DefaultContextWindowSize,
+			wantAnthropicModel: "claude-future-9-9-2026",
+		},
+		{
 			name:               "claude-opus-4-8[1m] exact-match preserves suffix without thinking",
 			model:              "claude-opus-4-8[1m]",
 			wantKiroModel:      "claude-opus-4.8",

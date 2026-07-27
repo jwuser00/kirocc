@@ -4,6 +4,7 @@ import (
 	"encoding/json/v2"
 	"log/slog"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 )
@@ -96,6 +97,49 @@ func effectiveMappings() []Mapping {
 	return result
 }
 
+// dateSuffixRE matches the release-date suffix Anthropic appends to public
+// model IDs, e.g. the `-20251001` in `claude-haiku-4-5-20251001`.
+var dateSuffixRE = regexp.MustCompile(`-\d{8}$`)
+
+// dashedVersionRE matches a trailing dashed version pair, e.g. the `-4-5` in
+// `claude-haiku-4-5`. Kiro SKUs spell that as `4.5`.
+var dashedVersionRE = regexp.MustCompile(`-(\d+)-(\d+)$`)
+
+// lookupForms returns the model ID spellings to try against the mapping table,
+// most specific first. Claude Code sends dated Anthropic IDs with dashed
+// version numbers (`claude-haiku-4-5-20251001`) while Kiro SKUs are undated
+// and dotted (`claude-haiku-4.5`), so an unmodified lookup misses and the ID
+// would otherwise be forwarded upstream verbatim and rejected with
+// INVALID_MODEL_ID.
+//
+// Order matters: the ID as given always wins, so an explicit mapping (built-in
+// or from KIROCC_MODEL_MAPPINGS) is never shadowed by a normalized form.
+func lookupForms(model string) []string {
+	forms := []string{model}
+	undated := dateSuffixRE.ReplaceAllString(model, "")
+	if undated != model {
+		forms = append(forms, undated)
+	}
+	if dotted := dashedVersionRE.ReplaceAllString(undated, "-$1.$2"); dotted != undated {
+		forms = append(forms, dotted)
+	}
+	return forms
+}
+
+// findMapping looks up model in mappings, trying each normalized form in turn.
+// The form loop is outer so that an exact match on any mapping beats a
+// normalized match on an earlier one.
+func findMapping(mappings []Mapping, model string) (Mapping, bool) {
+	for _, form := range lookupForms(model) {
+		for _, m := range mappings {
+			if form == m.Anthropic || form == m.Kiro {
+				return m, true
+			}
+		}
+	}
+	return Mapping{}, false
+}
+
 // Resolve maps an Anthropic or Kiro model name to the Kiro SKU sent upstream,
 // the thinking flag, the context window size, and the Anthropic-form ID to
 // echo back in /v1/messages responses.
@@ -109,6 +153,10 @@ func effectiveMappings() []Mapping {
 //     `thinking = true`, and retry the lookup. This is the legacy path
 //     used by aliases that don't have an explicit `[1m]` entry (e.g.
 //     `claude-sonnet-4-6[1m]` routes to the `-1m` Kiro SKU with thinking).
+//
+// Each tier tries the ID as given first, then the normalized forms from
+// lookupForms (date suffix stripped, dashed version dotted), so dated public
+// Anthropic IDs such as `claude-haiku-4-5-20251001` resolve to their Kiro SKU.
 //
 // The output `anthropicModel` gets a trailing `[1m]` when the routed
 // context window is 1M (regardless of thinking), so Claude Code's
@@ -124,33 +172,22 @@ func Resolve(model string, context1M bool) (kiroModel string, thinking bool, con
 
 	// Tier 1: exact match (no strip). Handles `claude-opus-4-7[1m]` etc.
 	mappings := effectiveMappings()
-	for _, m := range mappings {
-		if model == m.Anthropic || model == m.Kiro {
-			kiroModel = m.Kiro
-			matchedKiro1M = m.Kiro1M
-			matchedWindowSize = m.ContextWindowSize
-			matchedAnthropic = m.Anthropic
-			matched = true
-			break
-		}
-	}
+	m, matched := findMapping(mappings, model)
 
 	// Tier 2: strip `[1m]` (treated as thinking opt-in) and retry.
 	if !matched {
 		if before, ok := strings.CutSuffix(model, ThinkingSuffix); ok {
 			model = before
 			thinking = true
-			for _, m := range mappings {
-				if model == m.Anthropic || model == m.Kiro {
-					kiroModel = m.Kiro
-					matchedKiro1M = m.Kiro1M
-					matchedWindowSize = m.ContextWindowSize
-					matchedAnthropic = m.Anthropic
-					matched = true
-					break
-				}
-			}
+			m, matched = findMapping(mappings, model)
 		}
+	}
+
+	if matched {
+		kiroModel = m.Kiro
+		matchedKiro1M = m.Kiro1M
+		matchedWindowSize = m.ContextWindowSize
+		matchedAnthropic = m.Anthropic
 	}
 
 	if context1M {
