@@ -87,13 +87,18 @@ func extractRegionFromARN(arn string) string {
 // misconfigured, and the fallback would mask that condition.
 //
 // The CodeWhisperer profile ARN encodes the API region directly, so ARN-derived
-// values are preferred over auth.idc.region (which is the OIDC/SSO region and
-// can legitimately differ from the API region for IDC users).
+// values take priority over any stored region field. Both the token JSON
+// "region" and state "auth.idc.region" hold the OIDC/SSO region, which can
+// legitimately differ from the API region for IDC users: an Identity Center
+// instance in ap-northeast-2 can be issued a profile in us-east-1. Preferring
+// the stored region there would build runtime.ap-northeast-2.kiro.dev, which
+// does not exist. Stored regions remain as fallbacks for credentials that carry
+// no profile ARN, where they are the only signal available.
 func resolveRegion(tokenRegion, tokenProfileARN, stateRegion, stateProfileARN string) string {
 	candidates := []string{
-		tokenRegion,
 		extractRegionFromARN(tokenProfileARN),
 		extractRegionFromARN(stateProfileARN),
+		tokenRegion,
 		stateRegion,
 	}
 	for _, r := range candidates {

@@ -289,13 +289,38 @@ func TestReadCredentials(t *testing.T) {
 			},
 		},
 		{
-			name: "token JSON region beats ARN region",
+			name: "ARN region beats token JSON region",
 			authKV: map[string]string{
 				"kirocli:social:token": `{"accessToken":"a","refreshToken":"r","region":"eu-west-1","profile_arn":"arn:aws:codewhisperer:us-east-1:123:profile/X"}`,
 			},
 			check: func(t *testing.T, c *Credentials) {
-				if c.Region != "eu-west-1" {
-					t.Errorf("Region = %q, want %q (token region must win over ARN region)", c.Region, "eu-west-1")
+				if c.Region != "us-east-1" {
+					t.Errorf("Region = %q, want %q (profile ARN encodes the API region)", c.Region, "us-east-1")
+				}
+				if c.SSORegion != "eu-west-1" {
+					t.Errorf("SSORegion = %q, want %q (stored region stays the OIDC region)", c.SSORegion, "eu-west-1")
+				}
+			},
+		},
+		{
+			// Real-world IDC shape: Identity Center in ap-northeast-2, CodeWhisperer
+			// profile provisioned in us-east-1. The API region must come from the ARN
+			// because runtime.ap-northeast-2.kiro.dev does not exist, while token
+			// refresh must keep using the ap-northeast-2 OIDC endpoint.
+			name: "IDC sso region differs from profile region",
+			authKV: map[string]string{
+				"kirocli:odic:token": `{"accessToken":"a","refreshToken":"r","region":"ap-northeast-2"}`,
+			},
+			state: map[string]string{
+				"auth.idc.region":           "ap-northeast-2",
+				"api.codewhisperer.profile": `{"arn":"arn:aws:codewhisperer:us-east-1:642494478745:profile/X","profile_name":"KiroProfile-us-east-1"}`,
+			},
+			check: func(t *testing.T, c *Credentials) {
+				if c.Region != "us-east-1" {
+					t.Errorf("Region = %q, want %q (API region from profile ARN)", c.Region, "us-east-1")
+				}
+				if c.SSORegion != "ap-northeast-2" {
+					t.Errorf("SSORegion = %q, want %q (OIDC region for token refresh)", c.SSORegion, "ap-northeast-2")
 				}
 			},
 		},

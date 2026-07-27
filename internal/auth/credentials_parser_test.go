@@ -38,10 +38,12 @@ func TestResolveRegion(t *testing.T) {
 		stateARN    string
 		want        string
 	}{
-		{"token region wins over everything", "ap-northeast-1", arnUSEast, "us-west-2", arnEUWest, "ap-northeast-1"},
+		{"token ARN wins over everything", "ap-northeast-1", arnUSEast, "us-west-2", arnEUWest, "us-east-1"},
 		{"token ARN beats state side when token region empty", "", arnUSEast, "us-west-2", arnEUWest, "us-east-1"},
-		{"state ARN beats stateRegion (API region from profile ARN)", "", "", "us-west-2", arnEUWest, "eu-west-1"},
-		{"stateRegion used only when no ARN anywhere", "", "", "us-west-2", "", "us-west-2"},
+		{"state ARN beats stored regions (API region from profile ARN)", "ap-northeast-2", "", "us-west-2", arnEUWest, "eu-west-1"},
+		{"idc sso region differs from profile region", "ap-northeast-2", "", "ap-northeast-2", arnUSEast, "us-east-1"},
+		{"tokenRegion used when no ARN anywhere", "ap-northeast-1", "", "us-west-2", "", "ap-northeast-1"},
+		{"stateRegion used when no ARN and no tokenRegion", "", "", "us-west-2", "", "us-west-2"},
 		{"state ARN used when others empty", "", "", "", arnEUWest, "eu-west-1"},
 		{"all empty falls back to us-east-1", "", "", "", "", "us-east-1"},
 	}
