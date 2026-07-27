@@ -1,9 +1,77 @@
 package reqconv
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json/v2"
+	"fmt"
 	"log/slog"
 	"maps"
+	"sync"
 )
+
+// lossyWarnSeen tracks which lossy conversions have already been reported.
+// A tool schema is a static property of the client, so an unconditional warning
+// fires on every single request and buries the rest of the log. Each distinct
+// schema is reported once at Warn; repeats drop to Debug.
+var lossyWarnSeen sync.Map
+
+// lossyWarnCap bounds lossyWarnSeen so a client sending endlessly varying
+// schemas cannot grow it without limit. Past the cap, everything logs at Debug.
+const lossyWarnCap = 256
+
+var lossyWarnCount struct {
+	mu sync.Mutex
+	n  int
+}
+
+// warnLossyOnce reports a lossy combinator conversion, at Warn the first time a
+// given branch set is seen and at Debug afterwards.
+func warnLossyOnce(combinator string, branches []any) {
+	msg := "lossy schema conversion: using first branch only"
+	attrs := []any{"combinator", combinator, "branches", len(branches)}
+
+	if firstSighting(combinator, branches) {
+		slog.Warn(msg, attrs...)
+		return
+	}
+	slog.Debug(msg, attrs...)
+}
+
+// firstSighting reports whether this combinator/branch set has not been seen
+// before, recording it when there is room left under lossyWarnCap.
+func firstSighting(combinator string, branches []any) bool {
+	key, err := fingerprint(combinator, branches)
+	if err != nil {
+		// Unfingerprintable schema: fall back to Debug rather than risk
+		// warning on every request.
+		return false
+	}
+	if _, loaded := lossyWarnSeen.Load(key); loaded {
+		return false
+	}
+
+	lossyWarnCount.mu.Lock()
+	defer lossyWarnCount.mu.Unlock()
+	if _, loaded := lossyWarnSeen.Load(key); loaded {
+		return false
+	}
+	if lossyWarnCount.n >= lossyWarnCap {
+		return false
+	}
+	lossyWarnSeen.Store(key, struct{}{})
+	lossyWarnCount.n++
+	return true
+}
+
+func fingerprint(combinator string, branches []any) (string, error) {
+	encoded, err := json.Marshal(branches)
+	if err != nil {
+		return "", fmt.Errorf("fingerprint branches: %w", err)
+	}
+	sum := sha256.Sum256(encoded)
+	return combinator + ":" + hex.EncodeToString(sum[:]), nil
+}
 
 // unsupportedKeywords lists JSON Schema keywords that Kiro API rejects.
 var unsupportedKeywords = map[string]struct{}{
@@ -94,8 +162,7 @@ func SanitizeJSONSchema(schema map[string]any) map[string]any {
 						maps.Copy(result, SanitizeJSONSchema(m))
 					}
 				} else if first, ok := arr[0].(map[string]any); ok {
-					slog.Warn("lossy schema conversion: using first branch only",
-						"combinator", key, "branches", len(arr))
+					warnLossyOnce(key, arr)
 					maps.Copy(result, SanitizeJSONSchema(first))
 				}
 			}
