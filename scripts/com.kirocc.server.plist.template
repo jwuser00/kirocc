@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>@LABEL@</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>@BINARY@</string>
+		<string>-port</string>
+		<string>@PORT@</string>
+		<string>-log-file</string>
+		<string>@LOGFILE@</string>
+	</array>
+
+	<key>RunAtLoad</key>
+	<true/>
+
+	<key>KeepAlive</key>
+	<true/>
+
+	<!-- Back off between restarts so a permanent failure (port already in
+	     use, missing kiro-cli DB) does not spin. -->
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+
+	<key>ProcessType</key>
+	<string>Interactive</string>
+
+	<!-- kirocc writes its own rotating log via -log-file. These capture only
+	     what escapes the logger, e.g. a startup config error. -->
+	<key>StandardOutPath</key>
+	<string>@LAUNCHD_LOG@</string>
+	<key>StandardErrorPath</key>
+	<string>@LAUNCHD_LOG@</string>
+
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HOME</key>
+		<string>@HOME@</string>
+	</dict>
+</dict>
+</plist>

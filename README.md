@@ -60,6 +60,64 @@ claude
 
 `ANTHROPIC_AUTH_TOKEN` is required by Claude Code but not used for authentication by kirocc (credentials are read from Kiro CLI's DB). Any non-empty value works unless `-api-key` is set.
 
+### Run as a background service (macOS)
+
+To keep kirocc running across logins without a dedicated terminal, install it as
+a launchd user agent. From a clone of this repository:
+
+```bash
+make service-install              # build, install, start
+make service-install SHELL_ENV=1  # also add the Claude Code env to your shell rc
+```
+
+Then just run `claude`. The agent starts at login and is restarted by launchd if
+it exits.
+
+| Command                  | Description                                       |
+| ------------------------ | ------------------------------------------------- |
+| `make service-install`   | Build, install the agent, and start it            |
+| `make service-uninstall` | Stop and remove the agent                        |
+| `make service-restart`   | Restart the running agent                        |
+| `make service-status`    | Show agent state and whether the port answers    |
+| `make service-logs`      | Tail the kirocc log                              |
+
+What the installer touches:
+
+| Path                                              | Purpose                    |
+| ------------------------------------------------- | -------------------------- |
+| `~/.local/bin/kirocc`                             | Built binary               |
+| `~/Library/LaunchAgents/com.kirocc.server.plist`  | launchd agent definition   |
+| `~/Library/Logs/kirocc/kirocc.log`                | Rotating kirocc log        |
+| `~/Library/Logs/kirocc/launchd.log`               | launchd-level startup errors |
+
+Set `KIROCC_PORT` before installing to use a different port. The port is baked
+into the generated plist, so re-run `make service-install` after changing it.
+
+`ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` are read by the `claude` client,
+not by the kirocc server, so they cannot be supplied through the launchd agent.
+They have to be exported in the shell that runs `claude` — that is what
+`SHELL_ENV=1` automates.
+
+On Linux, use a systemd user unit instead:
+
+```ini
+# ~/.config/systemd/user/kirocc.service
+[Unit]
+Description=kirocc (Claude Code proxy)
+
+[Service]
+ExecStart=%h/.local/bin/kirocc -port 3456
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user enable --now kirocc
+```
+
 ### Command-line options
 
 | Flag               | Default                   | Description                                                        |
