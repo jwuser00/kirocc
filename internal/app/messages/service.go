@@ -17,6 +17,7 @@ type Service struct {
 	auth           TokenGetter
 	client         kiroclient.Client
 	captureEnabled bool
+	maxBodySize    int64
 }
 
 // Option configures a Service.
@@ -29,11 +30,18 @@ func WithCapture(enabled bool) Option {
 	return func(s *Service) { s.captureEnabled = enabled }
 }
 
+// WithMaxBodySize caps the accepted client request body in bytes. Zero or
+// negative means unlimited.
+func WithMaxBodySize(n int64) Option {
+	return func(s *Service) { s.maxBodySize = n }
+}
+
 // New constructs a message service.
 func New(authMgr TokenGetter, client kiroclient.Client, opts ...Option) *Service {
 	s := &Service{
-		auth:   authMgr,
-		client: client,
+		auth:        authMgr,
+		client:      client,
+		maxBodySize: DefaultMaxBodySize,
 	}
 	for _, opt := range opts {
 		opt(s)

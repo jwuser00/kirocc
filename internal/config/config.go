@@ -26,7 +26,10 @@ type Config struct {
 	// BaseURL overrides the whole Kiro runtime endpoint, bypassing region-based
 	// URL construction. Empty means "derive from region". Intended for proxies
 	// and debugging.
-	BaseURL       string
+	BaseURL string
+	// MaxBodySize caps an incoming client request body in bytes.
+	// Zero or negative means unlimited.
+	MaxBodySize   int64
 	Debug         bool
 	OTel          bool
 	OTelBodyLimit int
@@ -59,6 +62,9 @@ func ApplyEnvOverrides(cfg *Config) error {
 	applyString("KIROCC_HOST", &cfg.Host)
 	applyString("KIROCC_REGION", &cfg.Region)
 	applyString("KIROCC_BASE_URL", &cfg.BaseURL)
+	if err := applyInt64("KIROCC_MAX_BODY_SIZE", &cfg.MaxBodySize); err != nil {
+		return err
+	}
 	if err := applyInt("KIROCC_PORT", &cfg.Port); err != nil {
 		return err
 	}
@@ -127,6 +133,17 @@ func applyString(key string, dst *string) {
 func applyInt(key string, dst *int) error {
 	if v := os.Getenv(key); v != "" {
 		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("invalid %s=%q: %w", key, v, err)
+		}
+		*dst = n
+	}
+	return nil
+}
+
+func applyInt64(key string, dst *int64) error {
+	if v := os.Getenv(key); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
 		if err != nil {
 			return fmt.Errorf("invalid %s=%q: %w", key, v, err)
 		}

@@ -136,6 +136,7 @@ systemctl --user enable --now kirocc
 | `-log-compress`    | `false`                   | Compress rotated log files with gzip                               |
 | `-log-console`     | `false`                   | Also write logs to console when `-log-file` is set                 |
 | `-otel`            | `false`                   | Enable OpenTelemetry tracing (OTLP HTTP exporter)                  |
+| `-max-body-size`   | `134217728`               | Max accepted client request body in bytes (0 = unlimited)          |
 | `-otel-body-limit` | `32768`                   | Max bytes of request body to capture in OTel spans (0 = unlimited) |
 
 #### Default DB path
@@ -174,6 +175,7 @@ Command-line options can be overridden with environment variables.
 | `KIROCC_API_KEY`         | `-api-key`           |
 | `KIROCC_REGION`          | `-region`            |
 | `KIROCC_BASE_URL`        | `-base-url`          |
+| `KIROCC_MAX_BODY_SIZE`   | `-max-body-size`     |
 | `KIROCC_DEBUG`           | `-debug`             |
 | `KIROCC_LOG_FILE`        | `-log-file`          |
 | `KIROCC_LOG_MAX_SIZE`    | `-log-max-size`      |

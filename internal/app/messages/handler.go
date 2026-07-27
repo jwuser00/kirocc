@@ -20,7 +20,7 @@ func (s *Service) HandleMessages(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	traceID, short := logging.TraceIDs(ctx)
 
-	req, err := parseAndValidateRequest(ctx, w, r)
+	req, err := parseAndValidateRequest(ctx, w, r, s.maxBodySize)
 	if err != nil {
 		slog.WarnContext(ctx, "invalid request", "trace_id", short, "err", err)
 		httpx.WriteError(w, http.StatusBadRequest, errTypeInvalidRequest, err.Error())

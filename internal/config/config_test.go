@@ -166,6 +166,8 @@ func TestConfig_Validate(t *testing.T) {
 		{"base url without scheme", Config{Host: "127.0.0.1", Port: 3456, BaseURL: "runtime.us-east-1.kiro.dev"}, true},
 		{"base url with unsupported scheme", Config{Host: "127.0.0.1", Port: 3456, BaseURL: "ftp://example.com/"}, true},
 		{"base url without host", Config{Host: "127.0.0.1", Port: 3456, BaseURL: "https:///path"}, true},
+		{"max body size zero means unlimited", Config{Host: "127.0.0.1", Port: 3456, MaxBodySize: 0}, false},
+		{"max body size positive", Config{Host: "127.0.0.1", Port: 3456, MaxBodySize: 1 << 20}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -202,5 +204,26 @@ func TestApplyEnvOverrides_RegionUnsetKeepsFlagValue(t *testing.T) {
 	}
 	if cfg.Region != "eu-central-1" {
 		t.Errorf("Region = %q, want flag value %q to survive", cfg.Region, "eu-central-1")
+	}
+}
+
+func TestApplyEnvOverrides_MaxBodySize(t *testing.T) {
+	t.Setenv("KIROCC_MAX_BODY_SIZE", "67108864")
+
+	cfg := Config{MaxBodySize: 1 << 20}
+	if err := ApplyEnvOverrides(&cfg); err != nil {
+		t.Fatalf("ApplyEnvOverrides: %v", err)
+	}
+	if cfg.MaxBodySize != 67108864 {
+		t.Errorf("MaxBodySize = %d, want %d", cfg.MaxBodySize, 67108864)
+	}
+}
+
+func TestApplyEnvOverrides_MaxBodySizeInvalid(t *testing.T) {
+	t.Setenv("KIROCC_MAX_BODY_SIZE", "not-a-number")
+
+	cfg := Config{}
+	if err := ApplyEnvOverrides(&cfg); err == nil {
+		t.Error("expected an error for a non-numeric KIROCC_MAX_BODY_SIZE")
 	}
 }

@@ -19,7 +19,7 @@ import (
 
 // HandleCountTokens serves POST /v1/messages/count_tokens.
 func (s *Service) HandleCountTokens(w http.ResponseWriter, r *http.Request) {
-	req, err := parseAndValidateRequest(r.Context(), w, r)
+	req, err := parseAndValidateRequest(r.Context(), w, r, s.maxBodySize)
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, errTypeInvalidRequest, err.Error())
 		return
@@ -69,9 +69,21 @@ func (s *Service) HandleCountTokens(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("\n"))
 }
 
-// parseAndValidateRequest decodes and validates an Anthropic request from the HTTP body.
-func parseAndValidateRequest(ctx context.Context, w http.ResponseWriter, r *http.Request) (*anthropic.Request, error) {
-	r.Body = http.MaxBytesReader(w, r.Body, 4<<20)
+// DefaultMaxBodySize is the default cap on an incoming client request body.
+//
+// Claude Code sends the full conversation on every turn, so the body grows with
+// the transcript and carries base64 images and tool results. Real sessions
+// exceed a few MiB well before the model's context window is full, and a
+// request rejected here surfaces to the user as an opaque 400, so the default
+// is generous and only exists to bound memory.
+const DefaultMaxBodySize int64 = 128 << 20
+
+// parseAndValidateRequest decodes and validates an Anthropic request from the
+// HTTP body. A maxBody of zero or less leaves the body unbounded.
+func parseAndValidateRequest(ctx context.Context, w http.ResponseWriter, r *http.Request, maxBody int64) (*anthropic.Request, error) {
+	if maxBody > 0 {
+		r.Body = http.MaxBytesReader(w, r.Body, maxBody)
+	}
 	var req anthropic.Request
 	if slog.Default().Enabled(ctx, slog.LevelDebug) {
 		raw, err := io.ReadAll(r.Body)

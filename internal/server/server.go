@@ -24,12 +24,19 @@ func WithCapture(enabled bool) ServerOption {
 	return func(s *Server) { s.captureEnabled = enabled }
 }
 
+// WithMaxBodySize caps accepted client request bodies in bytes.
+// Zero or negative means unlimited.
+func WithMaxBodySize(n int64) ServerOption {
+	return func(s *Server) { s.maxBodySize = n }
+}
+
 // Server is the HTTP server for the kirocc proxy.
 type Server struct {
 	apiKey         string
 	otel           bool
 	otelBodyLimit  int
 	captureEnabled bool
+	maxBodySize    int64
 	mux            *http.ServeMux
 	messages       *messagesapp.Service
 }
@@ -37,13 +44,17 @@ type Server struct {
 // New creates a new Server.
 func New(authMgr messagesapp.TokenGetter, apiKey string, client kiroclient.Client, opts ...ServerOption) *Server {
 	s := &Server{
-		apiKey: apiKey,
-		mux:    http.NewServeMux(),
+		apiKey:      apiKey,
+		mux:         http.NewServeMux(),
+		maxBodySize: messagesapp.DefaultMaxBodySize,
 	}
 	for _, opt := range opts {
 		opt(s)
 	}
-	s.messages = messagesapp.New(authMgr, client, messagesapp.WithCapture(s.captureEnabled))
+	s.messages = messagesapp.New(authMgr, client,
+		messagesapp.WithCapture(s.captureEnabled),
+		messagesapp.WithMaxBodySize(s.maxBodySize),
+	)
 	s.registerRoutes()
 	return s
 }
