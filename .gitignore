@@ -33,6 +33,7 @@ go.work.sum
 
 # Build output
 dist/
+bin/
 
 # Project local directories
 _tmp/
