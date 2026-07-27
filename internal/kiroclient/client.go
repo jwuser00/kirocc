@@ -70,7 +70,7 @@ const defaultBodyReadIdleTimeout = 180 * time.Second
 // HTTPClient is the production implementation of Client.
 type HTTPClient struct {
 	httpClient     *http.Client
-	baseURL        string // override for tests; empty = use region-based URL
+	baseURL        string // full endpoint override; empty = use region-based URL
 	otel           bool
 	otelBodyLimit  int
 	tokenRefresher TokenRefresher
@@ -81,7 +81,9 @@ type HTTPClient struct {
 // HTTPClientOption configures an HTTPClient.
 type HTTPClientOption func(*HTTPClient)
 
-// WithBaseURL sets a custom base URL (for testing).
+// WithBaseURL sets a custom endpoint, bypassing region-based URL construction.
+// Used by tests and by the -base-url / KIROCC_BASE_URL escape hatch for
+// proxies and debugging.
 func WithBaseURL(url string) HTTPClientOption {
 	return func(c *HTTPClient) { c.baseURL = url }
 }

@@ -68,6 +68,8 @@ claude
 | `-host`            | `127.0.0.1`               | Bind host                                                          |
 | `-db`              | (OS-dependent, see below) | Kiro CLI SQLite DB path                                            |
 | `-api-key`         | (none)                    | API key required to access the proxy                               |
+| `-region`          | (from credentials)        | Override the Kiro API region (see below)                           |
+| `-base-url`        | (from region)             | Override the Kiro runtime endpoint entirely                        |
 | `-debug`           | `false`                   | Enable debug logging                                               |
 | `-log-file`        | (none)                    | Write logs to file with rotation (file-only by default)            |
 | `-log-max-size`    | `10`                      | Max log file size in MB before rotation                            |
@@ -85,6 +87,23 @@ claude
 | macOS | `~/Library/Application Support/kiro-cli/data.sqlite3` |
 | Linux | `~/.local/share/kiro-cli/data.sqlite3`                |
 
+#### API region
+
+The Kiro runtime endpoint is `https://runtime.<region>.kiro.dev/`. The region is
+resolved from the credential store, preferring the region encoded in the
+CodeWhisperer profile ARN (`api.codewhisperer.profile`), then any stored region
+field, then `us-east-1`.
+
+The profile ARN region is preferred because it is the API region, which can
+differ from the OIDC/SSO region for IDC users: an Identity Center instance in
+`ap-northeast-2` may be issued a profile in `us-east-1`. Token refresh keeps
+using the OIDC region independently of this setting.
+
+Use `-region` / `KIROCC_REGION` when the resolved region is not the one you need
+(for example when the credentials carry no profile ARN). Use `-base-url` /
+`KIROCC_BASE_URL` to bypass region-based URL construction entirely, which is
+useful for putting a proxy in front of the upstream API.
+
 ### Environment variables
 
 Command-line options can be overridden with environment variables.
@@ -95,6 +114,8 @@ Command-line options can be overridden with environment variables.
 | `KIROCC_HOST`            | `-host`              |
 | `KIROCC_DB_PATH`         | `-db`                |
 | `KIROCC_API_KEY`         | `-api-key`           |
+| `KIROCC_REGION`          | `-region`            |
+| `KIROCC_BASE_URL`        | `-base-url`          |
 | `KIROCC_DEBUG`           | `-debug`             |
 | `KIROCC_LOG_FILE`        | `-log-file`          |
 | `KIROCC_LOG_MAX_SIZE`    | `-log-max-size`      |

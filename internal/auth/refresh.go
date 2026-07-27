@@ -25,6 +25,18 @@ func WithHTTPClient(c *http.Client) Option {
 	return func(m *AuthManager) { m.httpClient = c }
 }
 
+// WithRegionOverride forces the API region used to build the Kiro runtime
+// endpoint, bypassing the region resolved from the credential store. It is an
+// escape hatch for credentials whose profile ARN is absent or does not encode
+// the servable API region.
+//
+// Only Credentials.Region is replaced. SSORegion is left untouched so token
+// refresh keeps talking to the OIDC endpoint the credentials were issued by.
+// An empty region is ignored, so callers can pass an unset config value.
+func WithRegionOverride(region string) Option {
+	return func(m *AuthManager) { m.regionOverride = region }
+}
+
 // AuthManager manages Kiro credentials with caching and automatic refresh.
 type AuthManager struct {
 	dbPath           string
@@ -35,6 +47,7 @@ type AuthManager struct {
 	refreshGroup     singleflight.Group
 	oidcEndpointFn   func(ssoRegion string) string
 	socialEndpointFn func(region string) string
+	regionOverride   string // empty = use the region resolved from credentials
 }
 
 func newDefaultHTTPClient() *http.Client {
@@ -178,8 +191,22 @@ func (m *AuthManager) refreshCredentials(ctx context.Context) (*Credentials, err
 	return refreshed, nil
 }
 
-// readFromDB opens (or reuses) the SQLite DB and reads credentials.
+// readFromDB opens (or reuses) the SQLite DB and reads credentials,
+// then applies the configured region override if one is set.
 func (m *AuthManager) readFromDB() (*Credentials, error) {
+	creds, err := m.readCredentials()
+	if err != nil {
+		return nil, err
+	}
+	if m.regionOverride != "" && m.regionOverride != creds.Region {
+		slog.Debug("region override applied",
+			"resolved", creds.Region, "override", m.regionOverride)
+		creds.Region = m.regionOverride
+	}
+	return creds, nil
+}
+
+func (m *AuthManager) readCredentials() (*Credentials, error) {
 	if m.db != nil {
 		return ReadCredentials(m.db)
 	}

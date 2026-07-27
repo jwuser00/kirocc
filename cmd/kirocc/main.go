@@ -61,7 +61,10 @@ func run(ctx context.Context, args []string) error {
 		slog.Info("OpenTelemetry tracing enabled", "body_limit", cfg.OTelBodyLimit)
 	}
 
-	authMgr := auth.NewAuthManager(cfg.DBPath)
+	authMgr := auth.NewAuthManager(cfg.DBPath, auth.WithRegionOverride(cfg.Region))
+	if cfg.Region != "" {
+		slog.Info("Kiro API region overridden", "region", cfg.Region)
+	}
 	kiroClient := buildKiroClient(authMgr, cfg)
 	srv := buildServer(authMgr, kiroClient, cfg)
 
@@ -102,6 +105,8 @@ func parseFlags(args []string) (config.Config, error) {
 	fs.StringVar(&cfg.Host, "host", "127.0.0.1", "bind host")
 	fs.StringVar(&cfg.DBPath, "db", config.DefaultDBPath(), "kiro-cli SQLite DB path")
 	fs.StringVar(&cfg.APIKey, "api-key", "", "optional API key for authentication")
+	fs.StringVar(&cfg.Region, "region", "", "override the Kiro API region (default: resolved from credentials)")
+	fs.StringVar(&cfg.BaseURL, "base-url", "", "override the Kiro runtime endpoint entirely (default: https://runtime.<region>.kiro.dev/)")
 	fs.BoolVar(&cfg.Debug, "debug", false, "enable debug logging with OTel JSON Lines output")
 	fs.BoolVar(&cfg.OTel, "otel", false, "enable OpenTelemetry tracing (OTLP HTTP exporter)")
 	fs.IntVar(&cfg.OTelBodyLimit, "otel-body-limit", config.DefaultOTelBodyLimit, "max bytes of request body to capture in OTel spans (0 = unlimited)")
@@ -130,6 +135,10 @@ func buildKiroClient(authMgr *auth.AuthManager, cfg config.Config) kiroclient.Cl
 			}
 			return creds.AccessToken, nil
 		}),
+	}
+	if cfg.BaseURL != "" {
+		clientOpts = append(clientOpts, kiroclient.WithBaseURL(cfg.BaseURL))
+		slog.Info("Kiro runtime endpoint overridden", "base_url", cfg.BaseURL)
 	}
 	if cfg.OTel {
 		clientOpts = append(clientOpts, kiroclient.WithOTel(cfg.OTelBodyLimit))

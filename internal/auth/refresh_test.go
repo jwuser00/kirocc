@@ -518,3 +518,80 @@ func TestNewAuthManager(t *testing.T) {
 		t.Error("expected error for nonexistent DB, got nil")
 	}
 }
+
+func TestAuthManager_RegionOverride(t *testing.T) {
+	futureExpiry := time.Now().Add(10 * time.Minute).Unix()
+
+	tests := []struct {
+		name          string
+		override      string
+		wantRegion    string
+		wantSSORegion string
+	}{
+		{"no override keeps resolved region", "", "ap-northeast-2", "ap-northeast-2"},
+		{"override replaces API region only", "us-east-1", "us-east-1", "ap-northeast-2"},
+		{"override equal to resolved region is a no-op", "ap-northeast-2", "ap-northeast-2", "ap-northeast-2"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db := setupTestDBWithCreds(t, "tok", "ref", futureExpiry, "ap-northeast-2")
+			defer func() { _ = db.Close() }()
+
+			m := newAuthManagerWithDB(db)
+			WithRegionOverride(tt.override)(m)
+
+			creds, err := m.GetToken(context.Background())
+			if err != nil {
+				t.Fatalf("GetToken: %v", err)
+			}
+			if creds.Region != tt.wantRegion {
+				t.Errorf("Region = %q, want %q", creds.Region, tt.wantRegion)
+			}
+			if creds.SSORegion != tt.wantSSORegion {
+				t.Errorf("SSORegion = %q, want %q (override must not touch the OIDC region)",
+					creds.SSORegion, tt.wantSSORegion)
+			}
+		})
+	}
+}
+
+// The override must survive a token refresh, since refreshCredentials rebuilds
+// the Credentials struct and carries fields over by hand.
+func TestAuthManager_RegionOverrideSurvivesRefresh(t *testing.T) {
+	expiredExpiry := time.Now().Add(-1 * time.Minute).Unix()
+	db := setupTestDBWithCreds(t, "stale", "ref", expiredExpiry, "ap-northeast-2")
+	defer func() { _ = db.Close() }()
+
+	var gotOIDCHost string
+	srv := newTCP4TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotOIDCHost = r.Host
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"accessToken":"fresh","refreshToken":"r2","expiresIn":3600}`))
+	}))
+
+	m := newAuthManagerWithDB(db)
+	WithRegionOverride("us-east-1")(m)
+	m.oidcEndpointFn = func(ssoRegion string) string {
+		if ssoRegion != "ap-northeast-2" {
+			t.Errorf("oidc ssoRegion = %q, want %q", ssoRegion, "ap-northeast-2")
+		}
+		return srv.URL + "/token"
+	}
+
+	creds, err := m.GetToken(context.Background())
+	if err != nil {
+		t.Fatalf("GetToken: %v", err)
+	}
+	if creds.AccessToken != "fresh" {
+		t.Errorf("AccessToken = %q, want %q", creds.AccessToken, "fresh")
+	}
+	if creds.Region != "us-east-1" {
+		t.Errorf("Region = %q, want %q after refresh", creds.Region, "us-east-1")
+	}
+	if creds.SSORegion != "ap-northeast-2" {
+		t.Errorf("SSORegion = %q, want %q after refresh", creds.SSORegion, "ap-northeast-2")
+	}
+	if gotOIDCHost == "" {
+		t.Error("OIDC refresh endpoint was not called")
+	}
+}

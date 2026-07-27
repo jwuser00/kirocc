@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -15,10 +16,17 @@ const DefaultOTelBodyLimit = 32 * 1024
 
 // Config is the runtime configuration for kirocc.
 type Config struct {
-	Port          int
-	Host          string
-	DBPath        string
-	APIKey        string
+	Port   int
+	Host   string
+	DBPath string
+	APIKey string
+	// Region overrides the Kiro API region resolved from the credential store.
+	// Empty means "use the resolved region".
+	Region string
+	// BaseURL overrides the whole Kiro runtime endpoint, bypassing region-based
+	// URL construction. Empty means "derive from region". Intended for proxies
+	// and debugging.
+	BaseURL       string
 	Debug         bool
 	OTel          bool
 	OTelBodyLimit int
@@ -49,6 +57,8 @@ func ApplyEnvOverrides(cfg *Config) error {
 	applyString("KIROCC_DB_PATH", &cfg.DBPath)
 	applyString("KIROCC_API_KEY", &cfg.APIKey)
 	applyString("KIROCC_HOST", &cfg.Host)
+	applyString("KIROCC_REGION", &cfg.Region)
+	applyString("KIROCC_BASE_URL", &cfg.BaseURL)
 	if err := applyInt("KIROCC_PORT", &cfg.Port); err != nil {
 		return err
 	}
@@ -92,6 +102,18 @@ func (c *Config) Validate() error {
 	}
 	if c.OTelBodyLimit < 0 {
 		return fmt.Errorf("otel-body-limit must be >= 0, got %d", c.OTelBodyLimit)
+	}
+	if c.BaseURL != "" {
+		u, err := url.Parse(c.BaseURL)
+		if err != nil {
+			return fmt.Errorf("invalid base-url %q: %w", c.BaseURL, err)
+		}
+		if u.Scheme != "http" && u.Scheme != "https" {
+			return fmt.Errorf("base-url must use http or https scheme, got %q", c.BaseURL)
+		}
+		if u.Host == "" {
+			return fmt.Errorf("base-url must include a host, got %q", c.BaseURL)
+		}
 	}
 	return nil
 }

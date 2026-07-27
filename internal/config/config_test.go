@@ -160,6 +160,12 @@ func TestConfig_Validate(t *testing.T) {
 		{"port negative", Config{Host: "127.0.0.1", Port: -1}, true},
 		{"port too large", Config{Host: "127.0.0.1", Port: 70000}, true},
 		{"negative otel body limit", Config{Host: "127.0.0.1", Port: 3456, OTelBodyLimit: -1}, true},
+		{"empty base url is allowed", Config{Host: "127.0.0.1", Port: 3456, BaseURL: ""}, false},
+		{"valid https base url", Config{Host: "127.0.0.1", Port: 3456, BaseURL: "https://runtime.us-east-1.kiro.dev/"}, false},
+		{"valid http base url", Config{Host: "127.0.0.1", Port: 3456, BaseURL: "http://localhost:8080/"}, false},
+		{"base url without scheme", Config{Host: "127.0.0.1", Port: 3456, BaseURL: "runtime.us-east-1.kiro.dev"}, true},
+		{"base url with unsupported scheme", Config{Host: "127.0.0.1", Port: 3456, BaseURL: "ftp://example.com/"}, true},
+		{"base url without host", Config{Host: "127.0.0.1", Port: 3456, BaseURL: "https:///path"}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -168,5 +174,33 @@ func TestConfig_Validate(t *testing.T) {
 				t.Errorf("Validate() err = %v, wantErr = %v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestApplyEnvOverrides_RegionAndBaseURL(t *testing.T) {
+	t.Setenv("KIROCC_REGION", "us-east-1")
+	t.Setenv("KIROCC_BASE_URL", "http://localhost:9999/")
+
+	cfg := Config{}
+	if err := ApplyEnvOverrides(&cfg); err != nil {
+		t.Fatalf("ApplyEnvOverrides: %v", err)
+	}
+	if cfg.Region != "us-east-1" {
+		t.Errorf("Region = %q, want %q", cfg.Region, "us-east-1")
+	}
+	if cfg.BaseURL != "http://localhost:9999/" {
+		t.Errorf("BaseURL = %q, want %q", cfg.BaseURL, "http://localhost:9999/")
+	}
+}
+
+func TestApplyEnvOverrides_RegionUnsetKeepsFlagValue(t *testing.T) {
+	t.Setenv("KIROCC_REGION", "")
+
+	cfg := Config{Region: "eu-central-1"}
+	if err := ApplyEnvOverrides(&cfg); err != nil {
+		t.Fatalf("ApplyEnvOverrides: %v", err)
+	}
+	if cfg.Region != "eu-central-1" {
+		t.Errorf("Region = %q, want flag value %q to survive", cfg.Region, "eu-central-1")
 	}
 }
