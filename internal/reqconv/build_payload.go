@@ -15,8 +15,13 @@ type BuildOptions struct {
 	// Effort is the resolved reasoning effort level (low/medium/high/xhigh/max).
 	// Empty means the model does not support effort or none was requested, in
 	// which case additionalModelRequestFields is omitted entirely.
-	Effort        string
-	ToolSearchCtx *toolsearch.Context
+	Effort string
+	// MaxHistoryImages caps how many earlier-turn images are replayed on the
+	// current message. Kiro history entries cannot carry images, so without
+	// replay an image is only visible on the turn it arrives. Zero disables
+	// replay; negative means unlimited.
+	MaxHistoryImages int
+	ToolSearchCtx    *toolsearch.Context
 }
 
 // BuildPayload converts an Anthropic request into a Kiro API payload.
@@ -48,7 +53,8 @@ func BuildPayload(req *anthropic.Request, options BuildOptions) (*kiroproto.Payl
 	if len(historyMsgs) > 0 {
 		precedingToolUseIDs = extractToolUseIDs(historyMsgs[len(historyMsgs)-1])
 	}
-	userInputMessage := buildCurrentMessage(lastMsg, lastContent, options.ModelID, toolEntries, envState, precedingToolUseIDs)
+	userInputMessage := buildCurrentMessage(lastMsg, lastContent, options.ModelID, toolEntries, envState, precedingToolUseIDs,
+		collectHistoryImages(historyMsgs, options.MaxHistoryImages))
 
 	convState := kiroproto.ConversationState{
 		ConversationID:  options.ConversationID,
@@ -138,7 +144,10 @@ func placeSystemPrompt(systemPrompt string, history []kiroproto.HistoryEntry, la
 }
 
 // buildCurrentMessage constructs the Kiro UserInputMessage from the last Anthropic message.
-func buildCurrentMessage(lastMsg anthropic.Message, lastContent, modelID string, toolEntries []kiroproto.ToolEntry, envState *kiroproto.EnvState, precedingToolUseIDs []string) kiroproto.UserInputMessage {
+// historyImages are images from earlier turns, replayed here because Kiro
+// history entries cannot carry them; they precede this turn's own images so the
+// ordering still runs oldest to newest.
+func buildCurrentMessage(lastMsg anthropic.Message, lastContent, modelID string, toolEntries []kiroproto.ToolEntry, envState *kiroproto.EnvState, precedingToolUseIDs []string, historyImages []kiroproto.Image) kiroproto.UserInputMessage {
 	msg := kiroproto.UserInputMessage{
 		Content: lastContent,
 		ModelID: modelID,
@@ -169,8 +178,8 @@ func buildCurrentMessage(lastMsg anthropic.Message, lastContent, modelID string,
 		msg.Content = syntheticContinue
 	}
 
-	if len(images) > 0 {
-		msg.Images = images
+	if len(historyImages) > 0 || len(images) > 0 {
+		msg.Images = append(historyImages, images...)
 	}
 
 	return msg

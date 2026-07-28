@@ -92,6 +92,86 @@ func TestExtractToolResults(t *testing.T) {
 	}
 }
 
+// A Read of an image file returns an image block nested inside the tool_result.
+// The history path cannot carry it (Kiro history entries have no images field),
+// so the text must say so rather than silently collapsing to "(empty result)".
+func TestExtractToolResults_NestedImagePlaceholder(t *testing.T) {
+	content := anthropic.MessageContent{
+		Blocks: []anthropic.ContentBlock{
+			{Type: "tool_result", ToolUseID: "toolu_01", Content: anthropic.MessageContent{
+				Blocks: []anthropic.ContentBlock{
+					{Type: "image", Source: &anthropic.ImageSource{Type: "base64", MediaType: "image/png", Data: "iVBOR"}},
+				},
+			}},
+		},
+	}
+	got := ExtractToolResults(content)
+	if len(got) != 1 {
+		t.Fatalf("got %d results, want 1", len(got))
+	}
+	stdout, ok := got[0].Content[0].JSON["stdout"].(string)
+	if !ok {
+		t.Fatalf("stdout is not a string: %v", got[0].Content[0].JSON)
+	}
+	if stdout != imageEarlierPlaceholder {
+		t.Fatalf("stdout = %q, want %q", stdout, imageEarlierPlaceholder)
+	}
+}
+
+// scanCurrentMessage is the current-message path: the image bytes move to
+// userInputMessage.images and the tool result keeps a placeholder in its place.
+func TestScanCurrentMessage_LiftsNestedImage(t *testing.T) {
+	content := anthropic.MessageContent{
+		Blocks: []anthropic.ContentBlock{
+			{Type: "tool_result", ToolUseID: "toolu_01", Content: anthropic.MessageContent{
+				Blocks: []anthropic.ContentBlock{
+					{Type: "text", Text: "Read image file"},
+					{Type: "image", Source: &anthropic.ImageSource{Type: "base64", MediaType: "image/png", Data: "iVBOR"}},
+				},
+			}},
+		},
+	}
+	toolResults, images := scanCurrentMessage(content)
+	if len(images) != 1 {
+		t.Fatalf("got %d images, want 1", len(images))
+	}
+	if images[0].Format != "png" || images[0].Source.Bytes != "iVBOR" {
+		t.Fatalf("unexpected image: %+v", images[0])
+	}
+	if len(toolResults) != 1 {
+		t.Fatalf("got %d tool results, want 1", len(toolResults))
+	}
+	stdout, ok := toolResults[0].Content[0].JSON["stdout"].(string)
+	if !ok {
+		t.Fatalf("stdout is not a string: %v", toolResults[0].Content[0].JSON)
+	}
+	want := "Read image file\n" + imageAttachedPlaceholder
+	if stdout != want {
+		t.Fatalf("stdout = %q, want %q", stdout, want)
+	}
+}
+
+// A tool_result carrying only an image must not be reported as a URL-source skip
+// or lost when the source is a URL Kiro cannot fetch.
+func TestScanCurrentMessage_NestedURLImageNotLifted(t *testing.T) {
+	content := anthropic.MessageContent{
+		Blocks: []anthropic.ContentBlock{
+			{Type: "tool_result", ToolUseID: "toolu_01", Content: anthropic.MessageContent{
+				Blocks: []anthropic.ContentBlock{
+					{Type: "image", Source: &anthropic.ImageSource{Type: "url", MediaType: "image/png", Data: "http://example.com/i.png"}},
+				},
+			}},
+		},
+	}
+	toolResults, images := scanCurrentMessage(content)
+	if len(images) != 0 {
+		t.Fatalf("got %d images, want 0", len(images))
+	}
+	if len(toolResults) != 1 {
+		t.Fatalf("got %d tool results, want 1", len(toolResults))
+	}
+}
+
 func TestExtractToolUses_Basic(t *testing.T) {
 	content := anthropic.MessageContent{
 		Blocks: []anthropic.ContentBlock{
@@ -285,6 +365,22 @@ func TestExtractImages(t *testing.T) {
 			name:    "string_content",
 			content: anthropic.MessageContent{Text: "just text"},
 			wantLen: 0,
+		},
+		{
+			name: "nested_in_tool_result",
+			content: anthropic.MessageContent{
+				Blocks: []anthropic.ContentBlock{
+					{Type: "tool_result", ToolUseID: "toolu_01", Content: anthropic.MessageContent{
+						Blocks: []anthropic.ContentBlock{
+							{Type: "text", Text: "Read image file"},
+							{Type: "image", Source: &anthropic.ImageSource{Type: "base64", MediaType: "image/png", Data: "iVBOR"}},
+						},
+					}},
+				},
+			},
+			wantLen:    1,
+			wantFormat: "png",
+			wantBytes:  "iVBOR",
 		},
 	}
 	for _, tt := range tests {

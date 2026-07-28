@@ -1,9 +1,6 @@
 package reqconv
 
 import (
-	"log/slog"
-	"strings"
-
 	"github.com/d-kuro/kirocc/internal/anthropic"
 	"github.com/d-kuro/kirocc/internal/kiroproto"
 )
@@ -11,6 +8,10 @@ import (
 // scanCurrentMessage walks message content once and extracts tool_results and
 // images. Replaces the former pattern of calling ExtractToolResults and
 // ExtractImages separately, which scanned the block list twice.
+//
+// Images nested inside a tool_result (what Claude Code sends after reading an
+// image file) are lifted into the message-level images array: Kiro tool results
+// carry text or JSON only, so an inline image block there would be dropped.
 func scanCurrentMessage(content anthropic.MessageContent) (toolResults []kiroproto.ToolResult, images []kiroproto.Image) {
 	if content.IsString() {
 		return nil, nil
@@ -18,39 +19,43 @@ func scanCurrentMessage(content anthropic.MessageContent) (toolResults []kiropro
 	for _, b := range content.Blocks {
 		switch {
 		case b.IsToolResult():
-			status := kiroproto.ToolResultStatusSuccess
-			exitStatus := "0"
-			if b.IsError {
-				status = kiroproto.ToolResultStatusError
-				exitStatus = "1"
+			for _, cb := range nestedImageBlocks(b) {
+				if img, ok := imageFromBlock(cb); ok {
+					images = append(images, img)
+				}
 			}
-			text := extractToolResultContentText(b)
-			if text == "" {
-				text = "(empty result)"
+			toolResults = append(toolResults, toolResultFromBlock(b, imageAttachedPlaceholder))
+		case b.Type == anthropic.BlockTypeImage:
+			if img, ok := imageFromBlock(b); ok {
+				images = append(images, img)
 			}
-			toolResults = append(toolResults, kiroproto.ToolResult{
-				ToolUseID: b.ToolUseID,
-				Status:    status,
-				Content: []kiroproto.ToolResultContent{{JSON: map[string]any{
-					"exit_status": exitStatus,
-					"stdout":      text,
-					"stderr":      "",
-				}}},
-			})
-		case b.Type == anthropic.BlockTypeImage && b.Source != nil:
-			if b.Source.Type != "base64" {
-				slog.Warn("skipping non-base64 image source type", "type", b.Source.Type)
-				continue
-			}
-			format := b.Source.MediaType
-			if idx := strings.LastIndex(format, "/"); idx >= 0 {
-				format = format[idx+1:]
-			}
-			images = append(images, kiroproto.Image{
-				Format: format,
-				Source: kiroproto.ImageSource{Bytes: b.Source.Data},
-			})
 		}
 	}
 	return toolResults, images
+}
+
+// toolResultFromBlock converts an Anthropic tool_result block to the Kiro wire
+// form. imagePlaceholder stands in for nested image blocks, which have no
+// representation in a Kiro tool result.
+func toolResultFromBlock(b anthropic.ContentBlock, imagePlaceholder string) kiroproto.ToolResult {
+	status := kiroproto.ToolResultStatusSuccess
+	// v3 captures show kiro-cli uses exit_status/stdout/stderr format.
+	exitStatus := "0"
+	if b.IsError {
+		status = kiroproto.ToolResultStatusError
+		exitStatus = "1"
+	}
+	text := extractToolResultContentText(b, imagePlaceholder)
+	if text == "" {
+		text = "(empty result)"
+	}
+	return kiroproto.ToolResult{
+		ToolUseID: b.ToolUseID,
+		Status:    status,
+		Content: []kiroproto.ToolResultContent{{JSON: map[string]any{
+			"exit_status": exitStatus,
+			"stdout":      text,
+			"stderr":      "",
+		}}},
+	}
 }

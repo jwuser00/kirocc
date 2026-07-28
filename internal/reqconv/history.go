@@ -35,9 +35,12 @@ func buildHistory(msgs []anthropic.Message, nameMap *ToolNameMap) []kiroproto.Hi
 				Content: content,
 				Origin:  kiroproto.OriginKiroCLI,
 			}
-			// Warn if images are present in history — Kiro history type does not support images.
+			// Kiro history entries have no images field. buildCurrentMessage
+			// replays these on the current message (capped by
+			// BuildOptions.MaxHistoryImages), so this only reports what the
+			// history entry itself cannot carry.
 			if images := ExtractImages(msg.Content); len(images) > 0 {
-				slog.Warn("images in history messages are not supported and will be dropped", "image_count", len(images))
+				slog.Debug("images cannot be attached to history entries; relying on current-message replay", "image_count", len(images))
 			}
 			toolResults := ExtractToolResults(msg.Content)
 			// Reorder tool results to match the preceding assistant's tool_use order.

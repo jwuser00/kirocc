@@ -137,7 +137,30 @@ systemctl --user enable --now kirocc
 | `-log-console`     | `false`                   | Also write logs to console when `-log-file` is set                 |
 | `-otel`            | `false`                   | Enable OpenTelemetry tracing (OTLP HTTP exporter)                  |
 | `-max-body-size`   | `134217728`               | Max accepted client request body in bytes (0 = unlimited)          |
+| `-max-history-images` | `10`                   | Images from earlier turns replayed on the current message (see below) |
 | `-otel-body-limit` | `32768`                   | Max bytes of request body to capture in OTel spans (0 = unlimited) |
+
+#### Images
+
+The Kiro request shape carries images only on the current message —
+`conversationState.history` entries have no `images` field. Without help, an
+image would therefore be visible on the turn it arrives and invisible on every
+turn after, which is worse than it sounds: the model cannot tell the image is
+gone, so a follow-up question ("what does that label say?") gets answered from
+the previous reply alone.
+
+Two adapter-side behaviours cover this:
+
+- Images nested inside a `tool_result` — what Claude Code sends after `Read` on
+  an image file — are lifted onto the message-level `images` array, since a Kiro
+  tool result carries text or JSON only. A placeholder marks where they were.
+- Images from earlier turns are replayed on the current message, newest first up
+  to `-max-history-images` (default 10). This is also what makes a pasted image
+  and a `Read` image usable together: they arrive on different turns, so without
+  replay only the newer one would be visible.
+
+Replay re-uploads every carried image on every turn, hence the cap. Set it to `0`
+to disable replay entirely, or a negative value for no limit.
 
 #### Default DB path
 
@@ -176,6 +199,7 @@ Command-line options can be overridden with environment variables.
 | `KIROCC_REGION`          | `-region`            |
 | `KIROCC_BASE_URL`        | `-base-url`          |
 | `KIROCC_MAX_BODY_SIZE`   | `-max-body-size`     |
+| `KIROCC_MAX_HISTORY_IMAGES` | `-max-history-images` |
 | `KIROCC_DEBUG`           | `-debug`             |
 | `KIROCC_LOG_FILE`        | `-log-file`          |
 | `KIROCC_LOG_MAX_SIZE`    | `-log-max-size`      |

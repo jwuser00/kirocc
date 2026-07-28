@@ -29,11 +29,16 @@ type Config struct {
 	BaseURL string
 	// MaxBodySize caps an incoming client request body in bytes.
 	// Zero or negative means unlimited.
-	MaxBodySize   int64
-	Debug         bool
-	OTel          bool
-	OTelBodyLimit int
-	LogFile       logging.LogFileConfig
+	MaxBodySize int64
+	// MaxHistoryImages caps how many images from earlier turns are replayed on
+	// the current message. Kiro history entries cannot carry images, so without
+	// replay an image is only visible on the turn it arrives. Zero disables
+	// replay; negative means unlimited.
+	MaxHistoryImages int
+	Debug            bool
+	OTel             bool
+	OTelBodyLimit    int
+	LogFile          logging.LogFileConfig
 }
 
 // DefaultDBPath returns the default kiro-cli SQLite database location.
@@ -63,6 +68,9 @@ func ApplyEnvOverrides(cfg *Config) error {
 	applyString("KIROCC_REGION", &cfg.Region)
 	applyString("KIROCC_BASE_URL", &cfg.BaseURL)
 	if err := applyInt64("KIROCC_MAX_BODY_SIZE", &cfg.MaxBodySize); err != nil {
+		return err
+	}
+	if err := applyInt("KIROCC_MAX_HISTORY_IMAGES", &cfg.MaxHistoryImages); err != nil {
 		return err
 	}
 	if err := applyInt("KIROCC_PORT", &cfg.Port); err != nil {

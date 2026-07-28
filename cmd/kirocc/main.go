@@ -19,6 +19,7 @@ import (
 	"github.com/d-kuro/kirocc/internal/config"
 	"github.com/d-kuro/kirocc/internal/kiroclient"
 	"github.com/d-kuro/kirocc/internal/logging"
+	"github.com/d-kuro/kirocc/internal/reqconv"
 	"github.com/d-kuro/kirocc/internal/server"
 	"github.com/d-kuro/kirocc/internal/tokencount"
 	"github.com/d-kuro/kirocc/internal/tracing"
@@ -109,6 +110,7 @@ func parseFlags(args []string) (config.Config, error) {
 	fs.StringVar(&cfg.Region, "region", "", "override the Kiro API region (default: resolved from credentials)")
 	fs.StringVar(&cfg.BaseURL, "base-url", "", "override the Kiro runtime endpoint entirely (default: https://runtime.<region>.kiro.dev/)")
 	fs.Int64Var(&cfg.MaxBodySize, "max-body-size", messages.DefaultMaxBodySize, "max accepted client request body in bytes (0 = unlimited)")
+	fs.IntVar(&cfg.MaxHistoryImages, "max-history-images", reqconv.DefaultMaxHistoryImages, "max images from earlier turns replayed on the current message, since Kiro history cannot carry them (0 = disable replay, negative = unlimited)")
 	fs.BoolVar(&cfg.Debug, "debug", false, "enable debug logging with OTel JSON Lines output")
 	fs.BoolVar(&cfg.OTel, "otel", false, "enable OpenTelemetry tracing (OTLP HTTP exporter)")
 	fs.IntVar(&cfg.OTelBodyLimit, "otel-body-limit", config.DefaultOTelBodyLimit, "max bytes of request body to capture in OTel spans (0 = unlimited)")
@@ -157,6 +159,7 @@ func buildServer(authMgr *auth.AuthManager, client kiroclient.Client, cfg config
 		opts = append(opts, server.WithCapture(true))
 	}
 	opts = append(opts, server.WithMaxBodySize(cfg.MaxBodySize))
+	opts = append(opts, server.WithMaxHistoryImages(cfg.MaxHistoryImages))
 	return server.New(authMgr, cfg.APIKey, client, opts...)
 }
 

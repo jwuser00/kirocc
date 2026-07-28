@@ -50,9 +50,12 @@ func textualizeAllToolContent(msgs []anthropic.Message) []anthropic.Message {
 				text := fmt.Sprintf("[Tool: %s (%s)]\n%s", b.Name, b.ID, string(inputJSON))
 				newBlocks = append(newBlocks, anthropic.ContentBlock{Type: anthropic.BlockTypeText, Text: text})
 			case anthropic.BlockTypeToolResult, anthropic.BlockTypeToolSearchToolResult:
-				content := extractToolResultContentText(b)
+				content := extractToolResultContentText(b, imageAttachedPlaceholder)
 				text := fmt.Sprintf("[Tool Result (%s)]\n%s", b.ToolUseID, content)
 				newBlocks = append(newBlocks, anthropic.ContentBlock{Type: anthropic.BlockTypeText, Text: text})
+				// Re-emit nested images at the top level so the bytes survive
+				// the textualization of their enclosing tool_result.
+				newBlocks = append(newBlocks, nestedImageBlocks(b)...)
 			default:
 				newBlocks = append(newBlocks, b)
 			}
@@ -88,9 +91,12 @@ func textualizeOrphanToolResults(msgs []anthropic.Message) []anthropic.Message {
 		for _, b := range msg.Content.Blocks {
 			if b.IsToolResult() {
 				if _, ok := assistantToolIDs[b.ToolUseID]; !ok {
-					content := extractToolResultContentText(b)
+					content := extractToolResultContentText(b, imageAttachedPlaceholder)
 					text := fmt.Sprintf("[Tool Result (%s)]\n%s", b.ToolUseID, content)
 					newBlocks = append(newBlocks, anthropic.ContentBlock{Type: anthropic.BlockTypeText, Text: text})
+					// Re-emit nested images at the top level so the bytes
+					// survive textualization of the orphan tool_result.
+					newBlocks = append(newBlocks, nestedImageBlocks(b)...)
 					continue
 				}
 			}
@@ -105,7 +111,10 @@ func textualizeOrphanToolResults(msgs []anthropic.Message) []anthropic.Message {
 }
 
 // extractToolResultContentText gets the text content from a tool_result block.
-func extractToolResultContentText(b anthropic.ContentBlock) string {
+// Nested image blocks are replaced by imagePlaceholder: a Kiro tool result
+// carries text or JSON only, so the bytes travel elsewhere (or not at all) and
+// the placeholder tells the model an image belonged here.
+func extractToolResultContentText(b anthropic.ContentBlock, imagePlaceholder string) string {
 	if b.Content.IsString() {
 		return b.Content.Text
 	}
@@ -114,6 +123,10 @@ func extractToolResultContentText(b anthropic.ContentBlock) string {
 		switch {
 		case cb.Type == anthropic.BlockTypeText:
 			parts = append(parts, cb.Text)
+		case cb.Type == anthropic.BlockTypeImage:
+			if imagePlaceholder != "" {
+				parts = append(parts, imagePlaceholder)
+			}
 		case cb.Type == anthropic.BlockTypeToolSearchSearchResult || len(cb.ToolReferences) > 0:
 			// Preserve tool_references from tool_search_tool_result content.
 			for _, ref := range cb.ToolReferences {
