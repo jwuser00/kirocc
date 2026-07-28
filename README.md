@@ -162,6 +162,14 @@ Two adapter-side behaviours cover this:
 Replay re-uploads every carried image on every turn, hence the cap. Set it to `0`
 to disable replay entirely, or a negative value for no limit.
 
+Images over 5 MB (measured on the base64 payload) are dropped with a placeholder
+rather than sent. Probing the backend shows the limit is per-image, not
+per-request — one 4.85 MiB image succeeds, one 5.24 MiB image fails, and four
+images totalling 12.40 MiB succeed. Rejection surfaces as a bare
+`upstream API error` 502 naming neither the image nor its size, and since replay
+resends history images every turn, one oversized image would otherwise fail every
+later turn in the session too.
+
 #### Default DB path
 
 | OS    | Path                                                  |

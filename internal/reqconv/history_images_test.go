@@ -1,6 +1,7 @@
 package reqconv
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/d-kuro/kirocc/internal/anthropic"
@@ -157,4 +158,58 @@ func TestCollectHistoryImages_Disabled(t *testing.T) {
 	if got := collectHistoryImages(msgs, 0); got != nil {
 		t.Fatalf("got %v, want nil when replay is disabled", got)
 	}
+}
+
+// The backend rejects a single image over 5MB with an unattributed 502, and
+// replay would repeat that on every later turn, so oversized images are dropped
+// before they reach the wire.
+func TestImageSizeLimit_OversizedNotCarried(t *testing.T) {
+	oversized := testImageBlock(strings.Repeat("A", maxImageBytes+1))
+	atLimit := testImageBlock(strings.Repeat("B", maxImageBytes))
+
+	if _, ok := imageFromBlock(oversized); ok {
+		t.Fatal("oversized image was carried, want dropped")
+	}
+	if _, ok := imageFromBlock(atLimit); !ok {
+		t.Fatal("image exactly at the limit was dropped, want carried")
+	}
+}
+
+// A dropped image must not be described as attached: the model cannot verify the
+// claim, and "attached" would make it answer as if it could see the image.
+func TestImageSizeLimit_PlaceholderTellsTheTruth(t *testing.T) {
+	big := anthropic.ContentBlock{
+		Type:      anthropic.BlockTypeToolResult,
+		ToolUseID: "t1",
+		Content: anthropic.MessageContent{Blocks: []anthropic.ContentBlock{
+			testImageBlock(strings.Repeat("A", maxImageBytes+1)),
+		}},
+	}
+	toolResults, images := scanCurrentMessage(anthropic.MessageContent{
+		Blocks: []anthropic.ContentBlock{big},
+	})
+	if len(images) != 0 {
+		t.Fatalf("got %d images, want 0", len(images))
+	}
+	stdout, ok := toolResults[0].Content[0].JSON["stdout"].(string)
+	if !ok {
+		t.Fatalf("stdout is not a string: %v", toolResults[0].Content[0].JSON)
+	}
+	if stdout != imageTooLargePlaceholder {
+		t.Fatalf("stdout = %q, want %q", stdout, imageTooLargePlaceholder)
+	}
+}
+
+// One oversized image must not take the whole request down with it: the others
+// still travel.
+func TestImageSizeLimit_OthersStillCarried(t *testing.T) {
+	msgs := []anthropic.Message{
+		{Role: "user", Content: anthropic.MessageContent{Blocks: []anthropic.ContentBlock{
+			{Type: anthropic.BlockTypeText, Text: "three images"},
+			testImageBlock("SMALL1"),
+			testImageBlock(strings.Repeat("A", maxImageBytes+1)),
+			testImageBlock("SMALL2"),
+		}}},
+	}
+	assertImages(t, buildWithImages(t, msgs, DefaultMaxHistoryImages), []string{"SMALL1", "SMALL2"})
 }

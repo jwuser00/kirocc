@@ -125,7 +125,7 @@ func extractToolResultContentText(b anthropic.ContentBlock, imagePlaceholder str
 			parts = append(parts, cb.Text)
 		case cb.Type == anthropic.BlockTypeImage:
 			if imagePlaceholder != "" {
-				parts = append(parts, imagePlaceholder)
+				parts = append(parts, imageBlockPlaceholder(cb, imagePlaceholder))
 			}
 		case cb.Type == anthropic.BlockTypeToolSearchSearchResult || len(cb.ToolReferences) > 0:
 			// Preserve tool_references from tool_search_tool_result content.
