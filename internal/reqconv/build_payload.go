@@ -2,6 +2,7 @@ package reqconv
 
 import (
 	"github.com/d-kuro/kirocc/internal/anthropic"
+	"github.com/d-kuro/kirocc/internal/kiromcp"
 	"github.com/d-kuro/kirocc/internal/kiroproto"
 	"github.com/d-kuro/kirocc/internal/toolsearch"
 	"github.com/google/uuid"
@@ -22,6 +23,10 @@ type BuildOptions struct {
 	// replay; negative means unlimited.
 	MaxHistoryImages int
 	ToolSearchCtx    *toolsearch.Context
+	// WebSearch enables translating Anthropic's WebSearch server tool into the
+	// Kiro-hosted web_search tool. Anthropic server tools are stripped either
+	// way; this only controls whether WebSearch gets a working replacement.
+	WebSearch bool
 }
 
 // BuildPayload converts an Anthropic request into a Kiro API payload.
@@ -29,7 +34,7 @@ func BuildPayload(req *anthropic.Request, options BuildOptions) (*kiroproto.Payl
 	nameMap := NewToolNameMap()
 
 	// 1. Build system prompt and convert tools.
-	systemPrompt, toolEntries := buildSystemAndTools(req, options.ToolSearchCtx, nameMap)
+	systemPrompt, toolEntries := buildSystemAndTools(req, options.ToolSearchCtx, nameMap, options.WebSearch)
 
 	// envState is derived from the system prompt's <env> block (no host
 	// fallback) and only ever attached to the current message.
@@ -78,18 +83,33 @@ func BuildPayload(req *anthropic.Request, options BuildOptions) (*kiroproto.Payl
 }
 
 // buildSystemAndTools extracts the system prompt and converts tools.
-func buildSystemAndTools(req *anthropic.Request, tsCtx *toolsearch.Context, nameMap *ToolNameMap) (string, []kiroproto.ToolEntry) {
+func buildSystemAndTools(req *anthropic.Request, tsCtx *toolsearch.Context, nameMap *ToolNameMap, webSearch bool) (string, []kiroproto.ToolEntry) {
 	systemPrompt := ExtractSystemPrompt(req.System)
 
+	// Anthropic's server tools carry no input_schema and would make Kiro reject
+	// the whole request, so they are stripped here regardless of mode. A
+	// WebSearch declaration is swapped for the Kiro-hosted equivalent below.
+	var (
+		tools         []anthropic.Tool
+		wantWebSearch bool
+		toolSearch    = tsCtx != nil
+	)
+	if toolSearch {
+		tools, wantWebSearch = RewriteServerTools(tsCtx.ActiveTools, webSearch)
+	} else {
+		tools, wantWebSearch = RewriteServerTools(req.Tools, webSearch)
+	}
+
 	var toolEntries []kiroproto.ToolEntry
-	if tsCtx != nil {
-		// Tool search mode: convert only active tools, inject ToolSearch tool.
-		toolEntries = ConvertTools(tsCtx.ActiveTools, nameMap)
-		toolEntries = ApplyToolCachePoints(tsCtx.ActiveTools, toolEntries)
+	if toolSearch || len(tools) > 0 || wantWebSearch {
+		toolEntries = ConvertTools(tools, nameMap)
+		toolEntries = ApplyToolCachePoints(tools, toolEntries)
+	}
+	if toolSearch {
 		toolEntries = append(toolEntries, toolsearch.KiroToolSearchEntry())
-	} else if len(req.Tools) > 0 {
-		toolEntries = ConvertTools(req.Tools, nameMap)
-		toolEntries = ApplyToolCachePoints(req.Tools, toolEntries)
+	}
+	if wantWebSearch {
+		toolEntries = append(toolEntries, kiromcp.WebSearchToolEntry())
 	}
 	return systemPrompt, toolEntries
 }
