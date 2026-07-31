@@ -111,8 +111,8 @@ func (a *responseAccumulator) processToolUseEvent(e kiroproto.Event, d *EventDel
 	if mapped, ok := a.toolNameMap[toolName]; ok {
 		toolName = mapped
 	}
-	// Skip recording filtered tools (e.g. internal ToolSearch).
-	if a.DropToolName != "" && e.ToolName == a.DropToolName {
+	// Skip recording filtered tools (e.g. internal ToolSearch, web_search).
+	if _, drop := a.DropToolNames[e.ToolName]; drop {
 		d.ToolStop = true
 		d.ToolUseID = e.ToolUseID
 		d.ToolName = toolName

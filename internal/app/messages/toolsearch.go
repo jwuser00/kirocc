@@ -12,6 +12,7 @@ import (
 	"github.com/d-kuro/kirocc/internal/anthropic"
 	"github.com/d-kuro/kirocc/internal/auth"
 	"github.com/d-kuro/kirocc/internal/httpx"
+	"github.com/d-kuro/kirocc/internal/kiromcp"
 	"github.com/d-kuro/kirocc/internal/kiroproto"
 	"github.com/d-kuro/kirocc/internal/logging"
 	"github.com/d-kuro/kirocc/internal/reqconv"
@@ -21,6 +22,40 @@ import (
 )
 
 const maxToolSearchRounds = 3
+
+// maxOrchestratorRounds bounds the shared round loop. ToolSearch and web_search
+// keep independent budgets (a response may legitimately use both), so the loop
+// has to allow for the worst case of each being exhausted in turn.
+const maxOrchestratorRounds = maxToolSearchRounds + maxWebSearchRounds
+
+// interception is a tool_use the orchestrator handles instead of forwarding.
+type interception struct {
+	name  string
+	input string
+}
+
+// budget tracks per-tool round usage so one tool cannot starve the other.
+type roundBudget struct {
+	toolSearch int
+	webSearch  int
+}
+
+// allow reports whether another round of the named tool is permitted, counting
+// it when it is. Exhausting a budget stops interception for that tool only.
+func (b *roundBudget) allow(name string) bool {
+	if name == kiromcp.WebSearchToolName {
+		if b.webSearch >= maxWebSearchRounds {
+			return false
+		}
+		b.webSearch++
+		return true
+	}
+	if b.toolSearch >= maxToolSearchRounds {
+		return false
+	}
+	b.toolSearch++
+	return true
+}
 
 // roundTotals accumulates per-round usage across tool-search rounds and folds
 // in the current (partial) round when a final summary is needed.
@@ -56,10 +91,15 @@ func (t roundTotals) creditsWith(credits float64, hasCredits bool) (float64, boo
 	return t.credits + credits, t.hasCredits || hasCredits
 }
 
-// toolSearchOrchestrator manages the inner loop for tool search.
+// toolSearchOrchestrator manages the inner loop for tools kirocc resolves
+// itself: ToolSearch (deferred tool loading) and the Kiro-hosted web_search.
+// Either may be active independently — tsCtx is nil when the client does not
+// use deferred tools, and webSearch is false when the feature is off — but
+// both share one round loop because a single response can call both.
 type toolSearchOrchestrator struct {
 	service           *Service
 	tsCtx             *toolsearch.Context
+	webSearch         bool
 	req               *anthropic.Request
 	creds             *auth.Credentials
 	buildOpts         reqconv.BuildOptions
@@ -87,8 +127,9 @@ func (o *toolSearchOrchestrator) handleStreaming(ctx context.Context, w http.Res
 	msgs := slices.Clone(o.req.Messages)
 
 	var totals roundTotals
+	var budget roundBudget
 
-	for round := range maxToolSearchRounds {
+	for round := range maxOrchestratorRounds {
 		payload, nameMap, err := o.buildPayload(msgs)
 		if err != nil {
 			slog.WarnContext(ctx, "tool search payload build error", "trace_id", short, "err", err)
@@ -111,20 +152,19 @@ func (o *toolSearchOrchestrator) handleStreaming(ctx context.Context, w http.Res
 			totals.addCompleted(in, out, credits, hasCredits)
 			sw.ResetAccumulator(o.contextWindowSize, o.req.StopSequences, o.req.MaxTokens, 0)
 		}
-		sw.SetDropToolName(toolsearch.KiroToolSearchName)
+		sw.SetDropToolNames(o.dropToolNames()...)
 
-		var foundToolSearch bool
-		var toolSearchInput string
+		var caught *interception
 		var streamErr, localStop bool
 
 		err = kiroproto.ParseStream(ctx, apiResp.Body, func(e kiroproto.Event) bool {
 			if streamErr || localStop {
 				return true
 			}
-			// After the tool-search frame is observed, keep parsing so subsequent
+			// After the intercepted frame is observed, keep parsing so subsequent
 			// meteringEvent / contextUsageEvent frames flow into the accumulator.
 			// Upstream errors in the tail must still abort the round.
-			if foundToolSearch {
+			if caught != nil {
 				if e.Type == kiroproto.EventException || e.Type == kiroproto.EventInvalidState {
 					streamErr = true
 					return true
@@ -136,9 +176,8 @@ func (o *toolSearchOrchestrator) handleStreaming(ctx context.Context, w http.Res
 				streamErr = true
 				return true
 			}
-			if e.Type == kiroproto.EventToolUse && e.ToolStop && e.ToolName == toolsearch.KiroToolSearchName {
-				foundToolSearch = true
-				toolSearchInput = e.ToolInput
+			if e.Type == kiroproto.EventToolUse && e.ToolStop && o.isIntercepted(e.ToolName) {
+				caught = &interception{name: e.ToolName, input: e.ToolInput}
 				return false
 			}
 			shouldStop := sw.HandleEvent(e)
@@ -174,7 +213,11 @@ func (o *toolSearchOrchestrator) handleStreaming(ctx context.Context, w http.Res
 			return ""
 		}
 
-		if !foundToolSearch {
+		if caught == nil || !budget.allow(caught.name) {
+			if caught != nil {
+				slog.WarnContext(ctx, "orchestrator round budget exhausted",
+					"trace_id", short, "tool", caught.name)
+			}
 			// streamErr was already handled above; only success/localStop reach here.
 			if !localStop {
 				sw.Finish()
@@ -195,8 +238,22 @@ func (o *toolSearchOrchestrator) handleStreaming(ctx context.Context, w http.Res
 			return ""
 		}
 
+		if caught.name == kiromcp.WebSearchToolName {
+			// Web search is invisible to the client: no SSE blocks are emitted,
+			// so Claude Code sees only the answer the results produced.
+			query, parseErr := parseWebSearchInput(caught.input)
+			if parseErr != nil {
+				slog.WarnContext(ctx, "web search input parse error", "trace_id", short, "err", parseErr)
+				writeStreamingOrJSONError(gw, sw, w, http.StatusBadRequest, errTypeInvalidRequest, parseErr.Error())
+				return ""
+			}
+			resultText, isErr := o.executeWebSearch(ctx, short, round, query)
+			msgs = appendWebSearchMessages(msgs, newWebSearchToolUseID(), query, resultText, isErr)
+			continue
+		}
+
 		// ToolSearch detected — execute search and emit SSE blocks.
-		query, maxResults, parseErr := parseToolSearchInput(toolSearchInput)
+		query, maxResults, parseErr := parseToolSearchInput(caught.input)
 		if parseErr != nil {
 			slog.WarnContext(ctx, "tool search input parse error", "trace_id", short, "err", parseErr)
 			writeStreamingOrJSONError(gw, sw, w, http.StatusBadRequest, errTypeInvalidRequest, parseErr.Error())
@@ -239,8 +296,9 @@ func (o *toolSearchOrchestrator) handleNonStreaming(ctx context.Context, w http.
 	var lastStopSequence any
 
 	var normalExit bool
+	var budget roundBudget
 
-	for round := range maxToolSearchRounds {
+	for round := range maxOrchestratorRounds {
 		payload, nameMap, err := o.buildPayload(msgs)
 		if err != nil {
 			httpx.WriteError(w, http.StatusBadRequest, errTypeInvalidRequest, err.Error())
@@ -255,28 +313,26 @@ func (o *toolSearchOrchestrator) handleNonStreaming(ctx context.Context, w http.
 		}
 
 		acc := respconv.NewNonStreamingAccumulator(o.contextWindowSize, o.req.StopSequences, o.req.MaxTokens, 0)
-		acc.SetDropToolName(toolsearch.KiroToolSearchName)
+		acc.SetDropToolNames(o.dropToolNames()...)
 		acc.SetToolNameMap(nameMap.ReverseMap())
 
 		var hasError bool
-		var foundToolSearch bool
-		var nsToolSearchInput string
+		var caught *interception
 		err = kiroproto.ParseStream(ctx, apiResp.Body, func(e kiroproto.Event) bool {
 			d := acc.ProcessEvent(e)
 			if d.IsError {
 				hasError = true
 				return true
 			}
-			// Detect filtered ToolSearch tool_use via EventDelta.
-			if d.ToolStop && d.ToolName == toolsearch.KiroToolSearchName {
-				foundToolSearch = true
-				nsToolSearchInput = d.ToolInput
+			// Detect filtered tool_use (ToolSearch, web_search) via EventDelta.
+			if d.ToolStop && o.isIntercepted(d.ToolName) {
+				caught = &interception{name: d.ToolName, input: d.ToolInput}
 			}
 			return false
 		})
 		_ = apiResp.Body.Close()
 
-		if (err != nil || hasError) && !foundToolSearch {
+		if (err != nil || hasError) && caught == nil {
 			httpx.WriteError(w, http.StatusBadGateway, errTypeAPI, "upstream error")
 			return ""
 		}
@@ -290,7 +346,11 @@ func (o *toolSearchOrchestrator) handleNonStreaming(ctx context.Context, w http.
 		content, _ := resp["content"].([]any)
 		orderedBlocks = append(orderedBlocks, content...)
 
-		if !foundToolSearch {
+		if caught == nil || !budget.allow(caught.name) {
+			if caught != nil {
+				slog.WarnContext(ctx, "orchestrator round budget exhausted",
+					"trace_id", short, "tool", caught.name)
+			}
 			// Detect empty visible end_turn (thinking-only response) and signal retry.
 			if acc.IsEmptyVisibleEndTurn() {
 				slog.WarnContext(ctx, "empty visible end_turn detected in tool search", "trace_id", short)
@@ -303,8 +363,22 @@ func (o *toolSearchOrchestrator) handleNonStreaming(ctx context.Context, w http.
 			break
 		}
 
+		if caught.name == kiromcp.WebSearchToolName {
+			// No blocks are added to orderedBlocks: the search stays invisible
+			// to the client, exactly as in the streaming path.
+			query, parseErr := parseWebSearchInput(caught.input)
+			if parseErr != nil {
+				slog.WarnContext(ctx, "web search input parse error", "trace_id", short, "err", parseErr)
+				httpx.WriteError(w, http.StatusBadRequest, errTypeInvalidRequest, parseErr.Error())
+				return ""
+			}
+			resultText, isErr := o.executeWebSearch(ctx, short, round, query)
+			msgs = appendWebSearchMessages(msgs, newWebSearchToolUseID(), query, resultText, isErr)
+			continue
+		}
+
 		// Execute search.
-		query, maxResults, parseErr := parseToolSearchInput(nsToolSearchInput)
+		query, maxResults, parseErr := parseToolSearchInput(caught.input)
 		if parseErr != nil {
 			slog.WarnContext(ctx, "tool search input parse error", "trace_id", short, "err", parseErr)
 			httpx.WriteError(w, http.StatusBadRequest, errTypeInvalidRequest, parseErr.Error())

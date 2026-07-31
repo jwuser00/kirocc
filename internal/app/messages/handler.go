@@ -57,17 +57,26 @@ func (s *Service) HandleMessages(w http.ResponseWriter, r *http.Request) {
 
 	effort := resolveEffort(ctx, kiroModel, req, thinking)
 
-	// Tool search short-circuits to the orchestrator, which has its own retry loop.
-	if tsCtx := toolsearch.NewContext(req.Tools); tsCtx != nil {
-		refs := reqconv.ExtractToolReferences(req.Messages)
-		tsCtx.PromoteTools(refs)
-		slog.InfoContext(ctx, "tool search enabled",
-			"trace_id", short,
-			"search_type", tsCtx.SearchType,
-			"deferred_tools", len(tsCtx.DeferredTools),
-			"active_tools", len(tsCtx.ActiveTools),
-		)
-		s.runToolSearch(ctx, w, req, creds, tsCtx, kiroModel, anthropicModel, contextWindowSize, thinking, effort, ccSessionID, short)
+	// Tool search and Kiro-hosted web search both need the orchestrator's round
+	// loop, so either one short-circuits into it. The orchestrator has its own
+	// retry handling.
+	tsCtx := toolsearch.NewContext(req.Tools)
+	webSearch := s.webSearchEnabled() && reqconv.WantsWebSearch(req.Tools, tsCtx)
+	if tsCtx != nil || webSearch {
+		if tsCtx != nil {
+			refs := reqconv.ExtractToolReferences(req.Messages)
+			tsCtx.PromoteTools(refs)
+			slog.InfoContext(ctx, "tool search enabled",
+				"trace_id", short,
+				"search_type", tsCtx.SearchType,
+				"deferred_tools", len(tsCtx.DeferredTools),
+				"active_tools", len(tsCtx.ActiveTools),
+			)
+		}
+		if webSearch {
+			slog.InfoContext(ctx, "kiro web search enabled", "trace_id", short)
+		}
+		s.runToolSearch(ctx, w, req, creds, tsCtx, webSearch, kiroModel, anthropicModel, contextWindowSize, thinking, effort, ccSessionID, short)
 		return
 	}
 
@@ -117,12 +126,13 @@ func (s *Service) logRequest(ctx context.Context, short, ccSessionID, kiroModel 
 }
 
 // runToolSearch wires up the orchestrator and retries once on empty-visible end_turn.
-func (s *Service) runToolSearch(ctx context.Context, w http.ResponseWriter, req *anthropic.Request, creds *auth.Credentials, tsCtx *toolsearch.Context, kiroModel, responseModel string, contextWindowSize int, thinking bool, effort string, ccSessionID, short string) {
+func (s *Service) runToolSearch(ctx context.Context, w http.ResponseWriter, req *anthropic.Request, creds *auth.Credentials, tsCtx *toolsearch.Context, webSearch bool, kiroModel, responseModel string, contextWindowSize int, thinking bool, effort string, ccSessionID, short string) {
 	orch := &toolSearchOrchestrator{
-		service: s,
-		tsCtx:   tsCtx,
-		req:     req,
-		creds:   creds,
+		service:   s,
+		tsCtx:     tsCtx,
+		webSearch: webSearch,
+		req:       req,
+		creds:     creds,
 		buildOpts: reqconv.BuildOptions{
 			ProfileARN:       creds.ProfileARN,
 			ModelID:          kiroModel,
@@ -130,6 +140,7 @@ func (s *Service) runToolSearch(ctx context.Context, w http.ResponseWriter, req 
 			Effort:           effort,
 			MaxHistoryImages: s.maxHistoryImages,
 			ToolSearchCtx:    tsCtx,
+			WebSearch:        webSearch,
 		},
 		contextWindowSize: contextWindowSize,
 		responseModel:     responseModel,

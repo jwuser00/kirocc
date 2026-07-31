@@ -354,9 +354,10 @@ func (s *SSEWriter) ThinkingLen() int {
 	return s.acc.ThinkingBuf.Len()
 }
 
-// SetDropToolName sets the tool name to filter from accumulator recording.
-func (s *SSEWriter) SetDropToolName(name string) {
-	s.acc.DropToolName = name
+// SetDropToolNames sets the tool names to filter from accumulator recording,
+// replacing any previous set.
+func (s *SSEWriter) SetDropToolNames(names ...string) {
+	s.acc.DropToolNames = dropSet(names)
 }
 
 // SetToolNameMap sets the short→original tool name map for response remapping.
@@ -367,10 +368,10 @@ func (s *SSEWriter) SetToolNameMap(m map[string]string) {
 // ResetAccumulator replaces the internal accumulator with a fresh one,
 // preserving the SSEWriter's block index and started state for continuation.
 func (s *SSEWriter) ResetAccumulator(contextWindowSize int, stopSequences []string, maxTokens int, preCountedInputTokens int) {
-	filterName := s.acc.DropToolName
+	filterNames := s.acc.DropToolNames
 	nameMap := s.acc.toolNameMap
 	s.acc = newAccumulator(contextWindowSize, stopSequences, maxTokens, preCountedInputTokens)
-	s.acc.DropToolName = filterName
+	s.acc.DropToolNames = filterNames
 	s.acc.toolNameMap = nameMap
 	s.activeType = ""
 }

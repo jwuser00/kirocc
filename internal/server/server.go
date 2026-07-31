@@ -5,6 +5,7 @@ import (
 
 	messagesapp "github.com/d-kuro/kirocc/internal/app/messages"
 	"github.com/d-kuro/kirocc/internal/kiroclient"
+	"github.com/d-kuro/kirocc/internal/kiromcp"
 	"github.com/d-kuro/kirocc/internal/reqconv"
 	"github.com/d-kuro/kirocc/internal/tracing"
 )
@@ -37,6 +38,12 @@ func WithMaxHistoryImages(n int) ServerOption {
 	return func(s *Server) { s.maxHistoryImages = n }
 }
 
+// WithMCPClient enables Kiro-hosted web search by supplying the InvokeMCP
+// client used to execute it. Nil leaves the feature disabled.
+func WithMCPClient(c kiromcp.Client) ServerOption {
+	return func(s *Server) { s.mcp = c }
+}
+
 // Server is the HTTP server for the kirocc proxy.
 type Server struct {
 	apiKey           string
@@ -45,6 +52,7 @@ type Server struct {
 	captureEnabled   bool
 	maxBodySize      int64
 	maxHistoryImages int
+	mcp              kiromcp.Client
 	mux              *http.ServeMux
 	messages         *messagesapp.Service
 }
@@ -64,6 +72,7 @@ func New(authMgr messagesapp.TokenGetter, apiKey string, client kiroclient.Clien
 		messagesapp.WithCapture(s.captureEnabled),
 		messagesapp.WithMaxBodySize(s.maxBodySize),
 		messagesapp.WithMaxHistoryImages(s.maxHistoryImages),
+		messagesapp.WithMCPClient(s.mcp),
 	)
 	s.registerRoutes()
 	return s

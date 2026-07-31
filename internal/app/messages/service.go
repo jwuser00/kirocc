@@ -5,6 +5,7 @@ import (
 
 	"github.com/d-kuro/kirocc/internal/auth"
 	"github.com/d-kuro/kirocc/internal/kiroclient"
+	"github.com/d-kuro/kirocc/internal/kiromcp"
 	"github.com/d-kuro/kirocc/internal/reqconv"
 )
 
@@ -17,6 +18,7 @@ type TokenGetter interface {
 type Service struct {
 	auth             TokenGetter
 	client           kiroclient.Client
+	mcp              kiromcp.Client
 	captureEnabled   bool
 	maxBodySize      int64
 	maxHistoryImages int
@@ -43,6 +45,17 @@ func WithMaxBodySize(n int64) Option {
 func WithMaxHistoryImages(n int) Option {
 	return func(s *Service) { s.maxHistoryImages = n }
 }
+
+// WithMCPClient enables Kiro-hosted web search by supplying the InvokeMCP
+// client used to execute it. A nil client (the default) leaves the feature off:
+// Anthropic's WebSearch declaration is still stripped so the request succeeds,
+// but no replacement tool is offered to the model.
+func WithMCPClient(c kiromcp.Client) Option {
+	return func(s *Service) { s.mcp = c }
+}
+
+// webSearchEnabled reports whether Kiro-hosted web search is available.
+func (s *Service) webSearchEnabled() bool { return s.mcp != nil }
 
 // New constructs a message service.
 func New(authMgr TokenGetter, client kiroclient.Client, opts ...Option) *Service {
