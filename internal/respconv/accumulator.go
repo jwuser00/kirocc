@@ -77,12 +77,30 @@ type responseAccumulator struct {
 	thinkingTagInside        bool   // currently inside <thinking> tags
 	thinkingTagBuf           string // buffer for partial tag matching across chunk boundaries
 	suppressReasoningContent bool   // true if <thinking> tags were detected (guards against double-counting with reasoningContentEvent)
-	// DropToolName, when set, causes ProcessEvent to skip recording tool_use
-	// events with this name in HasToolUse/ToolCalls (used by tool search orchestrator).
-	DropToolName string
+	// DropToolNames causes ProcessEvent to skip recording tool_use events with
+	// these names in HasToolUse/ToolCalls. Used by the orchestrator for tools
+	// kirocc executes itself and never surfaces to the client — ToolSearch and
+	// the Kiro-hosted web_search, which can both fire within one response.
+	DropToolNames map[string]struct{}
 	// toolNameMap maps shortened tool names back to originals (short→original).
 	// When set, tool names from Kiro responses are restored before emitting to the client.
 	toolNameMap map[string]string
+}
+
+// dropSet builds the DropToolNames set, returning nil for an empty input so
+// the common "nothing to drop" case stays allocation-free.
+func dropSet(names []string) map[string]struct{} {
+	var set map[string]struct{}
+	for _, n := range names {
+		if n == "" {
+			continue
+		}
+		if set == nil {
+			set = make(map[string]struct{}, len(names))
+		}
+		set[n] = struct{}{}
+	}
+	return set
 }
 
 // newAccumulator creates a responseAccumulator with common initialization.

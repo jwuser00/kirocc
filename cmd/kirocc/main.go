@@ -18,6 +18,7 @@ import (
 	"github.com/d-kuro/kirocc/internal/auth"
 	"github.com/d-kuro/kirocc/internal/config"
 	"github.com/d-kuro/kirocc/internal/kiroclient"
+	"github.com/d-kuro/kirocc/internal/kiromcp"
 	"github.com/d-kuro/kirocc/internal/logging"
 	"github.com/d-kuro/kirocc/internal/reqconv"
 	"github.com/d-kuro/kirocc/internal/server"
@@ -111,6 +112,7 @@ func parseFlags(args []string) (config.Config, error) {
 	fs.StringVar(&cfg.BaseURL, "base-url", "", "override the Kiro runtime endpoint entirely (default: https://runtime.<region>.kiro.dev/)")
 	fs.Int64Var(&cfg.MaxBodySize, "max-body-size", messages.DefaultMaxBodySize, "max accepted client request body in bytes (0 = unlimited)")
 	fs.IntVar(&cfg.MaxHistoryImages, "max-history-images", reqconv.DefaultMaxHistoryImages, "max images from earlier turns replayed on the current message, since Kiro history cannot carry them (0 = disable replay, negative = unlimited)")
+	fs.BoolVar(&cfg.WebSearch, "web-search", true, "translate Anthropic's WebSearch server tool into the Kiro-hosted web_search tool and execute it locally (schema-less Anthropic server tools are stripped either way)")
 	fs.BoolVar(&cfg.Debug, "debug", false, "enable debug logging with OTel JSON Lines output")
 	fs.BoolVar(&cfg.OTel, "otel", false, "enable OpenTelemetry tracing (OTLP HTTP exporter)")
 	fs.IntVar(&cfg.OTelBodyLimit, "otel-body-limit", config.DefaultOTelBodyLimit, "max bytes of request body to capture in OTel spans (0 = unlimited)")
@@ -160,7 +162,26 @@ func buildServer(authMgr *auth.AuthManager, client kiroclient.Client, cfg config
 	}
 	opts = append(opts, server.WithMaxBodySize(cfg.MaxBodySize))
 	opts = append(opts, server.WithMaxHistoryImages(cfg.MaxHistoryImages))
+	if cfg.WebSearch {
+		opts = append(opts, server.WithMCPClient(buildMCPClient(authMgr)))
+	}
 	return server.New(authMgr, cfg.APIKey, client, opts...)
+}
+
+// buildMCPClient constructs the client for the MCP endpoint AWS hosts behind
+// the Kiro subscription. It shares the credential store with the runtime
+// client, including the same refresh-on-403 path.
+func buildMCPClient(authMgr *auth.AuthManager) *kiromcp.HTTPClient {
+	return kiromcp.NewHTTPClient(
+		kiromcp.WithTokenRefresher(func(ctx context.Context) (string, error) {
+			authMgr.InvalidateCache()
+			creds, err := authMgr.GetToken(ctx)
+			if err != nil {
+				return "", err
+			}
+			return creds.AccessToken, nil
+		}),
+	)
 }
 
 func isLoopback(host string) bool {

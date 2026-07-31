@@ -35,10 +35,16 @@ type Config struct {
 	// replay an image is only visible on the turn it arrives. Zero disables
 	// replay; negative means unlimited.
 	MaxHistoryImages int
-	Debug            bool
-	OTel             bool
-	OTelBodyLimit    int
-	LogFile          logging.LogFileConfig
+	// WebSearch translates Anthropic's WebSearch server tool into the web_search
+	// tool AWS hosts behind the Kiro subscription, which kirocc then executes on
+	// the model's behalf. Anthropic's schema-less server tools are stripped from
+	// the request either way — Kiro rejects them — so disabling this only gives
+	// up the replacement capability, never request validity.
+	WebSearch     bool
+	Debug         bool
+	OTel          bool
+	OTelBodyLimit int
+	LogFile       logging.LogFileConfig
 }
 
 // DefaultDBPath returns the default kiro-cli SQLite database location.
@@ -74,6 +80,9 @@ func ApplyEnvOverrides(cfg *Config) error {
 		return err
 	}
 	if err := applyInt("KIROCC_PORT", &cfg.Port); err != nil {
+		return err
+	}
+	if err := applyBool("KIROCC_WEB_SEARCH", &cfg.WebSearch); err != nil {
 		return err
 	}
 	if err := applyBool("KIROCC_DEBUG", &cfg.Debug); err != nil {

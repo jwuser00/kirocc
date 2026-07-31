@@ -38,9 +38,10 @@ func (n *NonStreamingAccumulator) ProcessEvent(e kiroproto.Event) EventDelta {
 	return n.acc.ProcessEvent(e)
 }
 
-// SetDropToolName sets the tool name to filter from accumulator recording.
-func (n *NonStreamingAccumulator) SetDropToolName(name string) {
-	n.acc.DropToolName = name
+// SetDropToolNames sets the tool names to filter from accumulator recording,
+// replacing any previous set.
+func (n *NonStreamingAccumulator) SetDropToolNames(names ...string) {
+	n.acc.DropToolNames = dropSet(names)
 }
 
 // SetToolNameMap sets the short→original tool name map for response remapping.
