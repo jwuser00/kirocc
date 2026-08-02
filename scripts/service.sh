@@ -89,6 +89,18 @@ unload_agent() {
 	launchctl bootout "$(domain)/$LABEL" 2>/dev/null ||
 		launchctl unload -w "$PLIST_DEST" 2>/dev/null ||
 		true
+
+	# bootout returns before launchd has finished tearing the job down, so a
+	# bootstrap issued straight after it fails with "Load failed: 5:
+	# Input/output error" — the label is still registered. Wait for it to
+	# actually disappear. Ten seconds is well past any observed teardown; give
+	# up rather than loop forever so a wedged job surfaces as a load error.
+	local i
+	for i in $(seq 1 50); do
+		is_loaded || return 0
+		sleep 0.2
+	done
+	info "warning: $LABEL still registered after unload; load may fail"
 }
 
 shell_rc() {
