@@ -111,7 +111,7 @@ func parseFlags(args []string) (config.Config, error) {
 	fs.StringVar(&cfg.Region, "region", "", "override the Kiro API region (default: resolved from credentials)")
 	fs.StringVar(&cfg.BaseURL, "base-url", "", "override the Kiro runtime endpoint entirely (default: https://runtime.<region>.kiro.dev/)")
 	fs.Int64Var(&cfg.MaxBodySize, "max-body-size", messages.DefaultMaxBodySize, "max accepted client request body in bytes (0 = unlimited)")
-	fs.IntVar(&cfg.MaxHistoryImages, "max-history-images", reqconv.DefaultMaxHistoryImages, "max images from earlier turns replayed on the current message, since Kiro history cannot carry them (0 = disable replay, negative = unlimited)")
+	fs.IntVar(&cfg.HistoryImageTurns, "history-image-turns", reqconv.DefaultHistoryImageTurns, "how many earlier user turns still replay their images on the current message, since Kiro history cannot carry them (0 = disable replay, negative = unlimited)")
 	fs.BoolVar(&cfg.WebSearch, "web-search", true, "translate Anthropic's WebSearch server tool into the Kiro-hosted web_search tool and execute it locally (schema-less Anthropic server tools are stripped either way)")
 	fs.BoolVar(&cfg.Debug, "debug", false, "enable debug logging with OTel JSON Lines output")
 	fs.BoolVar(&cfg.OTel, "otel", false, "enable OpenTelemetry tracing (OTLP HTTP exporter)")
@@ -161,7 +161,7 @@ func buildServer(authMgr *auth.AuthManager, client kiroclient.Client, cfg config
 		opts = append(opts, server.WithCapture(true))
 	}
 	opts = append(opts, server.WithMaxBodySize(cfg.MaxBodySize))
-	opts = append(opts, server.WithMaxHistoryImages(cfg.MaxHistoryImages))
+	opts = append(opts, server.WithHistoryImageTurns(cfg.HistoryImageTurns))
 	if cfg.WebSearch {
 		opts = append(opts, server.WithMCPClient(buildMCPClient(authMgr)))
 	}

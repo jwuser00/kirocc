@@ -35,7 +35,7 @@ func readToolUse(id, path string) anthropic.ContentBlock {
 	}
 }
 
-func buildWithImages(t *testing.T, msgs []anthropic.Message, maxHistoryImages int) []string {
+func buildWithImages(t *testing.T, msgs []anthropic.Message, historyImageTurns int) []string {
 	t.Helper()
 	req := &anthropic.Request{
 		Model:    "m",
@@ -43,9 +43,9 @@ func buildWithImages(t *testing.T, msgs []anthropic.Message, maxHistoryImages in
 		Messages: msgs,
 	}
 	p, _, err := BuildPayload(req, BuildOptions{
-		ModelID:          "m",
-		ConversationID:   "c",
-		MaxHistoryImages: maxHistoryImages,
+		ModelID:           "m",
+		ConversationID:    "c",
+		HistoryImageTurns: historyImageTurns,
 	})
 	if err != nil {
 		t.Fatalf("BuildPayload: %v", err)
@@ -80,7 +80,7 @@ func TestHistoryImageReplay_SurvivesFollowUpTurn(t *testing.T) {
 		{Role: "assistant", Content: anthropic.MessageContent{Text: "A chart."}},
 		{Role: "user", Content: anthropic.MessageContent{Text: "what color is the bar?"}},
 	}
-	assertImages(t, buildWithImages(t, msgs, DefaultMaxHistoryImages), []string{"PASTED"})
+	assertImages(t, buildWithImages(t, msgs, DefaultHistoryImageTurns), []string{"PASTED"})
 	// Replay off reproduces the old behaviour: the image is gone.
 	assertImages(t, buildWithImages(t, msgs, 0), nil)
 }
@@ -101,7 +101,7 @@ func TestHistoryImageReplay_MixedPasteAndPath(t *testing.T) {
 		}}},
 	}
 	// History images come first, so the order is oldest to newest.
-	assertImages(t, buildWithImages(t, msgs, DefaultMaxHistoryImages), []string{"PASTED", "FROMPATH"})
+	assertImages(t, buildWithImages(t, msgs, DefaultHistoryImageTurns), []string{"PASTED", "FROMPATH"})
 	assertImages(t, buildWithImages(t, msgs, 0), []string{"FROMPATH"})
 }
 
@@ -122,8 +122,9 @@ func TestHistoryImageReplay_TwoPathsSameTurn(t *testing.T) {
 	assertImages(t, buildWithImages(t, msgs, 0), []string{"IMG_A", "IMG_B"})
 }
 
-// Past the cap, the oldest images are dropped and the newest are kept.
-func TestHistoryImageReplay_CapKeepsNewest(t *testing.T) {
+// The window is per turn, not per image: everything attached to a turn inside the
+// window is replayed, so a set sent together survives together.
+func TestHistoryImageWindow_KeepsWholeTurn(t *testing.T) {
 	msgs := []anthropic.Message{
 		{Role: "user", Content: anthropic.MessageContent{Blocks: []anthropic.ContentBlock{
 			testImageBlock("OLD1"), testImageBlock("OLD2"), testImageBlock("OLD3"),
@@ -131,13 +132,70 @@ func TestHistoryImageReplay_CapKeepsNewest(t *testing.T) {
 		{Role: "assistant", Content: anthropic.MessageContent{Text: "ok"}},
 		{Role: "user", Content: anthropic.MessageContent{Text: "and now?"}},
 	}
-	assertImages(t, buildWithImages(t, msgs, 2), []string{"OLD2", "OLD3"})
+	// One turn back, so all three of that turn's images come along.
+	assertImages(t, buildWithImages(t, msgs, DefaultHistoryImageTurns), []string{"OLD1", "OLD2", "OLD3"})
 	assertImages(t, buildWithImages(t, msgs, -1), []string{"OLD1", "OLD2", "OLD3"})
 }
 
-// The cap bounds replayed history images only; the current turn's own images are
-// always attached, so a capped session still sees what just arrived.
-func TestHistoryImageReplay_CapDoesNotDropCurrentTurn(t *testing.T) {
+// Turns older than the window stop being replayed, while the ones inside it keep
+// every image they carried.
+func TestHistoryImageWindow_DropsTurnsPastTheWindow(t *testing.T) {
+	userTurn := func(text, img string) []anthropic.Message {
+		return []anthropic.Message{
+			{Role: "user", Content: anthropic.MessageContent{Blocks: []anthropic.ContentBlock{
+				{Type: anthropic.BlockTypeText, Text: text},
+				testImageBlock(img),
+			}}},
+			{Role: "assistant", Content: anthropic.MessageContent{Text: "ok"}},
+		}
+	}
+	var msgs []anthropic.Message
+	msgs = append(msgs, userTurn("t1", "IMG1")...)
+	msgs = append(msgs, userTurn("t2", "IMG2")...)
+	msgs = append(msgs, userTurn("t3", "IMG3")...)
+	msgs = append(msgs, anthropic.Message{
+		Role: "user", Content: anthropic.MessageContent{Text: "now what?"},
+	})
+
+	// Two turns back reaches IMG2 and IMG3; IMG1 is out of the window.
+	assertImages(t, buildWithImages(t, msgs, 2), []string{"IMG2", "IMG3"})
+	assertImages(t, buildWithImages(t, msgs, 1), []string{"IMG3"})
+	assertImages(t, buildWithImages(t, msgs, -1), []string{"IMG1", "IMG2", "IMG3"})
+}
+
+// Tool results are user-role messages, so counting them as turns would let a few
+// Read calls expire an image before the user has said anything else.
+func TestHistoryImageWindow_ToolResultsAreNotTurns(t *testing.T) {
+	msgs := []anthropic.Message{
+		{Role: "user", Content: anthropic.MessageContent{Blocks: []anthropic.ContentBlock{
+			{Type: anthropic.BlockTypeText, Text: "look at this"},
+			testImageBlock("PASTED"),
+		}}},
+		{Role: "assistant", Content: anthropic.MessageContent{Blocks: []anthropic.ContentBlock{
+			readToolUse("t1", "/a.txt"),
+		}}},
+		{Role: "user", Content: anthropic.MessageContent{Blocks: []anthropic.ContentBlock{
+			{Type: anthropic.BlockTypeToolResult, ToolUseID: "t1",
+				Content: anthropic.MessageContent{Text: "contents"}},
+		}}},
+		{Role: "assistant", Content: anthropic.MessageContent{Blocks: []anthropic.ContentBlock{
+			readToolUse("t2", "/b.txt"),
+		}}},
+		{Role: "user", Content: anthropic.MessageContent{Blocks: []anthropic.ContentBlock{
+			{Type: anthropic.BlockTypeToolResult, ToolUseID: "t2",
+				Content: anthropic.MessageContent{Text: "contents"}},
+		}}},
+		{Role: "assistant", Content: anthropic.MessageContent{Text: "done"}},
+		{Role: "user", Content: anthropic.MessageContent{Text: "what did that label say?"}},
+	}
+	// Two tool-result rounds sit between the image and the question, but only the
+	// typed turns count, so the image is still one turn back.
+	assertImages(t, buildWithImages(t, msgs, 1), []string{"PASTED"})
+}
+
+// The window bounds replayed history images only; the current turn's own images are
+// always attached, so a narrow window still sees what just arrived.
+func TestHistoryImageWindow_DoesNotDropCurrentTurn(t *testing.T) {
 	msgs := []anthropic.Message{
 		{Role: "user", Content: anthropic.MessageContent{Blocks: []anthropic.ContentBlock{
 			testImageBlock("OLD1"), testImageBlock("OLD2"),
@@ -148,7 +206,7 @@ func TestHistoryImageReplay_CapDoesNotDropCurrentTurn(t *testing.T) {
 			testImageBlock("NEW"),
 		}}},
 	}
-	assertImages(t, buildWithImages(t, msgs, 1), []string{"OLD2", "NEW"})
+	assertImages(t, buildWithImages(t, msgs, 1), []string{"OLD1", "OLD2", "NEW"})
 }
 
 func TestCollectHistoryImages_Disabled(t *testing.T) {
@@ -157,6 +215,92 @@ func TestCollectHistoryImages_Disabled(t *testing.T) {
 	}
 	if got := collectHistoryImages(msgs, 0); got != nil {
 		t.Fatalf("got %v, want nil when replay is disabled", got)
+	}
+}
+
+// buildContent returns the current message's content text.
+func buildContent(t *testing.T, msgs []anthropic.Message, historyImageTurns int) string {
+	t.Helper()
+	req := &anthropic.Request{
+		Model:    "m",
+		Tools:    []anthropic.Tool{{Name: "Read", InputSchema: map[string]any{"type": "object"}}},
+		Messages: msgs,
+	}
+	p, _, err := BuildPayload(req, BuildOptions{
+		ModelID:           "m",
+		ConversationID:    "c",
+		HistoryImageTurns: historyImageTurns,
+	})
+	if err != nil {
+		t.Fatalf("BuildPayload: %v", err)
+	}
+	return p.ConversationState.CurrentMessage.UserInputMessage.Content
+}
+
+// Replay drops an old image into the slot a freshly sent one would occupy, so the
+// content has to say which of the leading images are old. Otherwise a screenshot
+// from an earlier task reads as part of the current question.
+func TestHistoryImageNote_MarksReplayedImages(t *testing.T) {
+	msgs := []anthropic.Message{
+		{Role: "user", Content: anthropic.MessageContent{Blocks: []anthropic.ContentBlock{
+			{Type: anthropic.BlockTypeText, Text: "look at this"},
+			testImageBlock("OLD"),
+		}}},
+		{Role: "assistant", Content: anthropic.MessageContent{Text: "ok"}},
+		{Role: "user", Content: anthropic.MessageContent{Text: "unrelated question"}},
+	}
+	got := buildContent(t, msgs, DefaultHistoryImageTurns)
+	if !strings.Contains(got, "earlier turn") {
+		t.Fatalf("content = %q, want a note about the replayed image", got)
+	}
+	if !strings.Contains(got, "unrelated question") {
+		t.Fatalf("content = %q, want the user's own text kept", got)
+	}
+}
+
+// Singular and plural both have to read correctly, since the count is what tells
+// the model how many leading images to discount.
+func TestHistoryImageNote_CountMatchesReplayed(t *testing.T) {
+	twoInOneTurn := []anthropic.Message{
+		{Role: "user", Content: anthropic.MessageContent{Blocks: []anthropic.ContentBlock{
+			testImageBlock("OLD1"), testImageBlock("OLD2"),
+		}}},
+		{Role: "assistant", Content: anthropic.MessageContent{Text: "ok"}},
+		{Role: "user", Content: anthropic.MessageContent{Text: "next"}},
+	}
+	if got := buildContent(t, twoInOneTurn, DefaultHistoryImageTurns); !strings.Contains(got, "first 2 images") {
+		t.Fatalf("content = %q, want a count of 2", got)
+	}
+	// The window is per turn, so narrowing it to one turn still replays both of
+	// that turn's images — the count follows what was actually attached, not the
+	// window size.
+	if got := buildContent(t, twoInOneTurn, 1); !strings.Contains(got, "first 2 images") {
+		t.Fatalf("content = %q, want both images of the previous turn counted", got)
+	}
+
+	oneInOneTurn := []anthropic.Message{
+		{Role: "user", Content: anthropic.MessageContent{Blocks: []anthropic.ContentBlock{
+			testImageBlock("ONLY"),
+		}}},
+		{Role: "assistant", Content: anthropic.MessageContent{Text: "ok"}},
+		{Role: "user", Content: anthropic.MessageContent{Text: "next"}},
+	}
+	if got := buildContent(t, oneInOneTurn, DefaultHistoryImageTurns); !strings.Contains(got, "first image") {
+		t.Fatalf("content = %q, want the singular note for a single replayed image", got)
+	}
+}
+
+// A turn with no replayed images must read exactly as it did before this note
+// existed, including the images the user just sent.
+func TestHistoryImageNote_AbsentWithoutReplay(t *testing.T) {
+	msgs := []anthropic.Message{
+		{Role: "user", Content: anthropic.MessageContent{Blocks: []anthropic.ContentBlock{
+			{Type: anthropic.BlockTypeText, Text: "just this"},
+			testImageBlock("NEW"),
+		}}},
+	}
+	if got := buildContent(t, msgs, DefaultHistoryImageTurns); strings.Contains(got, "earlier turn") {
+		t.Fatalf("content = %q, want no note when nothing was replayed", got)
 	}
 }
 
@@ -211,5 +355,5 @@ func TestImageSizeLimit_OthersStillCarried(t *testing.T) {
 			testImageBlock("SMALL2"),
 		}}},
 	}
-	assertImages(t, buildWithImages(t, msgs, DefaultMaxHistoryImages), []string{"SMALL1", "SMALL2"})
+	assertImages(t, buildWithImages(t, msgs, DefaultHistoryImageTurns), []string{"SMALL1", "SMALL2"})
 }

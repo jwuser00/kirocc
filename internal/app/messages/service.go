@@ -16,12 +16,12 @@ type TokenGetter interface {
 
 // Service owns message execution and token counting flows.
 type Service struct {
-	auth             TokenGetter
-	client           kiroclient.Client
-	mcp              kiromcp.Client
-	captureEnabled   bool
-	maxBodySize      int64
-	maxHistoryImages int
+	auth              TokenGetter
+	client            kiroclient.Client
+	mcp               kiromcp.Client
+	captureEnabled    bool
+	maxBodySize       int64
+	historyImageTurns int
 }
 
 // Option configures a Service.
@@ -40,10 +40,10 @@ func WithMaxBodySize(n int64) Option {
 	return func(s *Service) { s.maxBodySize = n }
 }
 
-// WithMaxHistoryImages caps how many earlier-turn images are replayed on the
-// current message. Zero disables replay; negative means unlimited.
-func WithMaxHistoryImages(n int) Option {
-	return func(s *Service) { s.maxHistoryImages = n }
+// WithHistoryImageTurns sets how many earlier user turns still replay their
+// images on the current message. Zero disables replay; negative means unlimited.
+func WithHistoryImageTurns(n int) Option {
+	return func(s *Service) { s.historyImageTurns = n }
 }
 
 // WithMCPClient enables Kiro-hosted web search by supplying the InvokeMCP
@@ -60,10 +60,10 @@ func (s *Service) webSearchEnabled() bool { return s.mcp != nil }
 // New constructs a message service.
 func New(authMgr TokenGetter, client kiroclient.Client, opts ...Option) *Service {
 	s := &Service{
-		auth:             authMgr,
-		client:           client,
-		maxBodySize:      DefaultMaxBodySize,
-		maxHistoryImages: reqconv.DefaultMaxHistoryImages,
+		auth:              authMgr,
+		client:            client,
+		maxBodySize:       DefaultMaxBodySize,
+		historyImageTurns: reqconv.DefaultHistoryImageTurns,
 	}
 	for _, opt := range opts {
 		opt(s)

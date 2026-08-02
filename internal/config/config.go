@@ -30,11 +30,12 @@ type Config struct {
 	// MaxBodySize caps an incoming client request body in bytes.
 	// Zero or negative means unlimited.
 	MaxBodySize int64
-	// MaxHistoryImages caps how many images from earlier turns are replayed on
-	// the current message. Kiro history entries cannot carry images, so without
-	// replay an image is only visible on the turn it arrives. Zero disables
-	// replay; negative means unlimited.
-	MaxHistoryImages int
+	// HistoryImageTurns is how many earlier user turns still replay their images
+	// on the current message. Kiro history entries cannot carry images, so
+	// without replay an image is only visible on the turn it arrives. Counted in
+	// turns rather than images so a set attached together expires together. Zero
+	// disables replay; negative means unlimited.
+	HistoryImageTurns int
 	// WebSearch translates Anthropic's WebSearch server tool into the web_search
 	// tool AWS hosts behind the Kiro subscription, which kirocc then executes on
 	// the model's behalf. Anthropic's schema-less server tools are stripped from
@@ -76,7 +77,7 @@ func ApplyEnvOverrides(cfg *Config) error {
 	if err := applyInt64("KIROCC_MAX_BODY_SIZE", &cfg.MaxBodySize); err != nil {
 		return err
 	}
-	if err := applyInt("KIROCC_MAX_HISTORY_IMAGES", &cfg.MaxHistoryImages); err != nil {
+	if err := applyInt("KIROCC_HISTORY_IMAGE_TURNS", &cfg.HistoryImageTurns); err != nil {
 		return err
 	}
 	if err := applyInt("KIROCC_PORT", &cfg.Port); err != nil {

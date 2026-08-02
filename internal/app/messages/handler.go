@@ -81,11 +81,11 @@ func (s *Service) HandleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	payload, nameMap, err := reqconv.BuildPayload(req, reqconv.BuildOptions{
-		ProfileARN:       creds.ProfileARN,
-		ModelID:          kiroModel,
-		ConversationID:   ccSessionID,
-		Effort:           effort,
-		MaxHistoryImages: s.maxHistoryImages,
+		ProfileARN:        creds.ProfileARN,
+		ModelID:           kiroModel,
+		ConversationID:    ccSessionID,
+		Effort:            effort,
+		HistoryImageTurns: s.historyImageTurns,
 	})
 	if err != nil {
 		slog.WarnContext(ctx, "payload build error", "trace_id", short, "err", err)
@@ -134,13 +134,13 @@ func (s *Service) runToolSearch(ctx context.Context, w http.ResponseWriter, req 
 		req:       req,
 		creds:     creds,
 		buildOpts: reqconv.BuildOptions{
-			ProfileARN:       creds.ProfileARN,
-			ModelID:          kiroModel,
-			ConversationID:   ccSessionID,
-			Effort:           effort,
-			MaxHistoryImages: s.maxHistoryImages,
-			ToolSearchCtx:    tsCtx,
-			WebSearch:        webSearch,
+			ProfileARN:        creds.ProfileARN,
+			ModelID:           kiroModel,
+			ConversationID:    ccSessionID,
+			Effort:            effort,
+			HistoryImageTurns: s.historyImageTurns,
+			ToolSearchCtx:     tsCtx,
+			WebSearch:         webSearch,
 		},
 		contextWindowSize: contextWindowSize,
 		responseModel:     responseModel,

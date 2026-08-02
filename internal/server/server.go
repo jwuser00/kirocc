@@ -32,10 +32,10 @@ func WithMaxBodySize(n int64) ServerOption {
 	return func(s *Server) { s.maxBodySize = n }
 }
 
-// WithMaxHistoryImages caps how many earlier-turn images are replayed on the
-// current message. Zero disables replay; negative means unlimited.
-func WithMaxHistoryImages(n int) ServerOption {
-	return func(s *Server) { s.maxHistoryImages = n }
+// WithHistoryImageTurns sets how many earlier user turns still replay their
+// images on the current message. Zero disables replay; negative means unlimited.
+func WithHistoryImageTurns(n int) ServerOption {
+	return func(s *Server) { s.historyImageTurns = n }
 }
 
 // WithMCPClient enables Kiro-hosted web search by supplying the InvokeMCP
@@ -46,24 +46,24 @@ func WithMCPClient(c kiromcp.Client) ServerOption {
 
 // Server is the HTTP server for the kirocc proxy.
 type Server struct {
-	apiKey           string
-	otel             bool
-	otelBodyLimit    int
-	captureEnabled   bool
-	maxBodySize      int64
-	maxHistoryImages int
-	mcp              kiromcp.Client
-	mux              *http.ServeMux
-	messages         *messagesapp.Service
+	apiKey            string
+	otel              bool
+	otelBodyLimit     int
+	captureEnabled    bool
+	maxBodySize       int64
+	historyImageTurns int
+	mcp               kiromcp.Client
+	mux               *http.ServeMux
+	messages          *messagesapp.Service
 }
 
 // New creates a new Server.
 func New(authMgr messagesapp.TokenGetter, apiKey string, client kiroclient.Client, opts ...ServerOption) *Server {
 	s := &Server{
-		apiKey:           apiKey,
-		mux:              http.NewServeMux(),
-		maxBodySize:      messagesapp.DefaultMaxBodySize,
-		maxHistoryImages: reqconv.DefaultMaxHistoryImages,
+		apiKey:            apiKey,
+		mux:               http.NewServeMux(),
+		maxBodySize:       messagesapp.DefaultMaxBodySize,
+		historyImageTurns: reqconv.DefaultHistoryImageTurns,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -71,7 +71,7 @@ func New(authMgr messagesapp.TokenGetter, apiKey string, client kiroclient.Clien
 	s.messages = messagesapp.New(authMgr, client,
 		messagesapp.WithCapture(s.captureEnabled),
 		messagesapp.WithMaxBodySize(s.maxBodySize),
-		messagesapp.WithMaxHistoryImages(s.maxHistoryImages),
+		messagesapp.WithHistoryImageTurns(s.historyImageTurns),
 		messagesapp.WithMCPClient(s.mcp),
 	)
 	s.registerRoutes()

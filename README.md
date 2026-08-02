@@ -137,7 +137,7 @@ systemctl --user enable --now kirocc
 | `-log-console`     | `false`                   | Also write logs to console when `-log-file` is set                 |
 | `-otel`            | `false`                   | Enable OpenTelemetry tracing (OTLP HTTP exporter)                  |
 | `-max-body-size`   | `134217728`               | Max accepted client request body in bytes (0 = unlimited)          |
-| `-max-history-images` | `10`                   | Images from earlier turns replayed on the current message (see below) |
+| `-history-image-turns` | `2`                   | Earlier user turns that still replay their images on the current message (see below) |
 | `-otel-body-limit` | `32768`                   | Max bytes of request body to capture in OTel spans (0 = unlimited) |
 
 #### Images
@@ -154,13 +154,31 @@ Two adapter-side behaviours cover this:
 - Images nested inside a `tool_result` — what Claude Code sends after `Read` on
   an image file — are lifted onto the message-level `images` array, since a Kiro
   tool result carries text or JSON only. A placeholder marks where they were.
-- Images from earlier turns are replayed on the current message, newest first up
-  to `-max-history-images` (default 10). This is also what makes a pasted image
-  and a `Read` image usable together: they arrive on different turns, so without
-  replay only the newer one would be visible.
+- Images from an earlier turn are replayed on the current message for the next
+  `-history-image-turns` user turns (default 2 — the current turn plus the two
+  before it). The window counts turns rather than images so that a set attached
+  together expires together: five images sent at once stay usable as a set for
+  as long as a lone image would. This is also what makes a pasted image and a
+  `Read` image usable together, since they arrive on different turns.
 
-Replay re-uploads every carried image on every turn, hence the cap. Set it to `0`
-to disable replay entirely, or a negative value for no limit.
+Replay puts an old image in exactly the place a freshly sent one would occupy, so
+the current message's text gains a note saying how many of the leading images came
+from earlier turns. Without it a screenshot from ten turns ago reads as part of
+the current question, and the model has no way to tell otherwise — `images`
+entries carry bytes and format and nothing else.
+
+That note fixes the misreading but not the bill. Replay attaches to the current
+message, which changes every turn, so the bytes are never prompt-cached: every
+carried image is charged again on every turn, which is why the window is short
+rather than generous. Once a turn falls outside it the `[image provided earlier in
+this conversation]` placeholder stays in history, so the model still knows an image
+was there and can ask for it again instead of guessing. Set it to `0` to disable
+replay entirely (the upstream behaviour: earlier-turn images are dropped), or a
+negative value for no limit.
+
+Tool results arrive as user-role messages too, so they are not counted as turns —
+a handful of `Read` calls cannot consume the window before you have said anything
+else.
 
 Images over 5 MB (measured on the base64 payload) are dropped with a placeholder
 rather than sent. Probing the backend shows the limit is per-image, not
@@ -207,7 +225,7 @@ Command-line options can be overridden with environment variables.
 | `KIROCC_REGION`          | `-region`            |
 | `KIROCC_BASE_URL`        | `-base-url`          |
 | `KIROCC_MAX_BODY_SIZE`   | `-max-body-size`     |
-| `KIROCC_MAX_HISTORY_IMAGES` | `-max-history-images` |
+| `KIROCC_HISTORY_IMAGE_TURNS` | `-history-image-turns` |
 | `KIROCC_DEBUG`           | `-debug`             |
 | `KIROCC_LOG_FILE`        | `-log-file`          |
 | `KIROCC_LOG_MAX_SIZE`    | `-log-max-size`      |

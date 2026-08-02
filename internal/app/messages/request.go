@@ -43,7 +43,7 @@ func (s *Service) HandleCountTokens(w http.ResponseWriter, r *http.Request) {
 	// derived inside BuildPayload from the system prompt).
 	effort := resolveEffort(r.Context(), kiroModel, req, thinking)
 
-	payload, _, err := reqconv.BuildPayload(req, reqconv.BuildOptions{ProfileARN: profileARN, ModelID: kiroModel, ConversationID: ccSessionID, Effort: effort, MaxHistoryImages: s.maxHistoryImages})
+	payload, _, err := reqconv.BuildPayload(req, reqconv.BuildOptions{ProfileARN: profileARN, ModelID: kiroModel, ConversationID: ccSessionID, Effort: effort, HistoryImageTurns: s.historyImageTurns})
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, errTypeInvalidRequest, err.Error())
 		return

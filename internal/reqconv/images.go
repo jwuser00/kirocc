@@ -1,6 +1,7 @@
 package reqconv
 
 import (
+	"fmt"
 	"log/slog"
 	"strings"
 
@@ -34,15 +35,60 @@ func imageBlockPlaceholder(b anthropic.ContentBlock, dflt string) string {
 	return dflt
 }
 
-// DefaultMaxHistoryImages is how many images from earlier turns are replayed on
-// the current message by default.
+// DefaultHistoryImageTurns is how many earlier user turns still contribute
+// replayed images to the current message.
 //
 // Kiro's history entries have no images field, so an image is only visible on
 // the turn it arrives. Without replay, any follow-up question that needs to look
 // at the image again ("what does that label say?") is answered from the previous
 // reply alone — the model cannot tell that the image is gone, so it guesses.
-// Replaying costs a re-upload of every carried image on every turn, hence a cap.
-const DefaultMaxHistoryImages = 10
+//
+// The window is counted in turns rather than images so that everything attached
+// to one turn expires together: five images sent at once stay usable as a set for
+// as long as a single image would, which is what makes a "compare these" request
+// survive into the next question. historyImageNote keeps a replayed image from
+// being read as part of the current question, so the window is purely about cost
+// — and that cost is unavoidable: replay attaches to the current message, which
+// changes every turn, so the bytes are never prompt-cached and every carried
+// image is billed again on every turn.
+//
+// Two means the current turn plus the two user turns before it. Past the window
+// the imageEarlierPlaceholder text remains in history, so the model still knows
+// an image was there and can ask for it again rather than guessing. Set 0 for the
+// upstream behaviour of dropping earlier-turn images outright.
+const DefaultHistoryImageTurns = 2
+
+// historyImageNote explains why images from earlier turns are attached to the
+// current message.
+//
+// Replay is the only way to keep them visible, but it also strips their
+// provenance: an image from ten turns ago arrives in exactly the same place as
+// one the user just sent, so the model has no reason not to treat an unrelated
+// screenshot as part of the current question. kiroproto.Image carries bytes and
+// format and nothing else, so the note has to travel in the message text.
+//
+// historyImages are prepended to the current turn's own images, which is what
+// makes "the first N" accurate.
+func historyImageNote(n int) string {
+	if n == 1 {
+		return "[Note: the first image attached to this message is from an earlier turn " +
+			"of this conversation, not newly sent with this message.]"
+	}
+	return fmt.Sprintf("[Note: the first %d images attached to this message are from "+
+		"earlier turns of this conversation, not newly sent with this message.]", n)
+}
+
+// appendHistoryImageNote adds the replay note to a current-message content
+// string. A tool-result-only turn has empty content, and the note becomes the
+// whole of it: the provenance is worth more than matching kiro-cli's empty-string
+// shape on those turns.
+func appendHistoryImageNote(content string, n int) string {
+	note := historyImageNote(n)
+	if content == "" {
+		return note
+	}
+	return content + "\n\n" + note
+}
 
 // maxImageBytes is the largest single image the Kiro backend accepts, measured
 // on the base64 payload.
@@ -125,26 +171,81 @@ func nestedImageBlocks(b anthropic.ContentBlock) []anthropic.ContentBlock {
 	return out
 }
 
+// isUserTurnStart reports whether msg is a turn the user actually typed, as
+// opposed to a tool_result continuation.
+//
+// Tool results arrive as user-role messages too, so counting raw user messages
+// would let a handful of Read calls consume the whole window before the user has
+// said anything else. Anything attached during those continuations still belongs
+// to the turn that started them.
+func isUserTurnStart(msg anthropic.Message) bool {
+	if msg.Role != "user" {
+		return false
+	}
+	if msg.Content.IsString() {
+		return true
+	}
+	for _, b := range msg.Content.Blocks {
+		switch b.Type {
+		case anthropic.BlockTypeToolResult, anthropic.BlockTypeToolSearchToolResult:
+			continue
+		default:
+			return true
+		}
+	}
+	return false
+}
+
+// historyImageWindowStart returns the index in msgs where the replay window
+// begins: the start of the turns'th most recent user turn. A history with fewer
+// user turns than that keeps everything.
+func historyImageWindowStart(msgs []anthropic.Message, turns int) int {
+	seen := 0
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if !isUserTurnStart(msgs[i]) {
+			continue
+		}
+		seen++
+		if seen > turns {
+			return i + 1
+		}
+	}
+	return 0
+}
+
 // collectHistoryImages returns the images from earlier-turn messages, oldest
-// first, keeping at most the newest max. A max of zero disables replay; a
-// negative max keeps everything.
+// first, keeping those from the most recent turns user turns. Zero disables
+// replay; a negative value keeps every earlier-turn image.
 //
 // Kiro drops images that fall out of the current message (history entries have
-// no images field), so these are re-sent on the current message to keep them
-// visible for the rest of the session.
-func collectHistoryImages(msgs []anthropic.Message, max int) []kiroproto.Image {
-	if max == 0 || len(msgs) == 0 {
+// no images field), so these are re-sent on the current message to stay visible.
+// The window is per turn rather than per image so that a set sent together
+// expires together — five images attached at once remain usable as a set for the
+// same span a lone image would.
+func collectHistoryImages(msgs []anthropic.Message, turns int) []kiroproto.Image {
+	if turns == 0 || len(msgs) == 0 {
 		return nil
 	}
+
+	start := 0
+	if turns > 0 {
+		start = historyImageWindowStart(msgs, turns)
+	}
+
 	var images []kiroproto.Image
-	for _, msg := range msgs {
+	for _, msg := range msgs[start:] {
 		images = append(images, ExtractImages(msg.Content)...)
 	}
-	if max > 0 && len(images) > max {
-		dropped := len(images) - max
-		slog.Warn("history image replay cap reached; dropping oldest images",
-			"cap", max, "dropped", dropped, "total", len(images))
-		images = images[dropped:]
+
+	if start > 0 {
+		var older int
+		for _, msg := range msgs[:start] {
+			older += len(ExtractImages(msg.Content))
+		}
+		if older > 0 {
+			slog.Debug("history images outside the replay window; not resent",
+				"turns", turns, "dropped", older, "replayed", len(images))
+		}
 	}
 	return images
 }

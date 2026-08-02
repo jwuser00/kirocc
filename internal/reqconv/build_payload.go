@@ -17,12 +17,13 @@ type BuildOptions struct {
 	// Empty means the model does not support effort or none was requested, in
 	// which case additionalModelRequestFields is omitted entirely.
 	Effort string
-	// MaxHistoryImages caps how many earlier-turn images are replayed on the
-	// current message. Kiro history entries cannot carry images, so without
-	// replay an image is only visible on the turn it arrives. Zero disables
-	// replay; negative means unlimited.
-	MaxHistoryImages int
-	ToolSearchCtx    *toolsearch.Context
+	// HistoryImageTurns is how many earlier user turns still contribute replayed
+	// images to the current message. Kiro history entries cannot carry images, so
+	// without replay an image is only visible on the turn it arrives. Counted in
+	// turns rather than images so a set attached together expires together. Zero
+	// disables replay; negative means unlimited.
+	HistoryImageTurns int
+	ToolSearchCtx     *toolsearch.Context
 	// WebSearch enables translating Anthropic's WebSearch server tool into the
 	// Kiro-hosted web_search tool. Anthropic server tools are stripped either
 	// way; this only controls whether WebSearch gets a working replacement.
@@ -59,7 +60,7 @@ func BuildPayload(req *anthropic.Request, options BuildOptions) (*kiroproto.Payl
 		precedingToolUseIDs = extractToolUseIDs(historyMsgs[len(historyMsgs)-1])
 	}
 	userInputMessage := buildCurrentMessage(lastMsg, lastContent, options.ModelID, toolEntries, envState, precedingToolUseIDs,
-		collectHistoryImages(historyMsgs, options.MaxHistoryImages))
+		collectHistoryImages(historyMsgs, options.HistoryImageTurns))
 
 	convState := kiroproto.ConversationState{
 		ConversationID:  options.ConversationID,
@@ -200,6 +201,12 @@ func buildCurrentMessage(lastMsg anthropic.Message, lastContent, modelID string,
 
 	if len(historyImages) > 0 || len(images) > 0 {
 		msg.Images = append(historyImages, images...)
+	}
+	// Replayed images arrive in the same place as ones the user just sent, so
+	// say which are which. Without this the model reads a screenshot from ten
+	// turns ago as part of the current question.
+	if len(historyImages) > 0 {
+		msg.Content = appendHistoryImageNote(msg.Content, len(historyImages))
 	}
 
 	return msg
