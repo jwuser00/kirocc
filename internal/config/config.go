@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 
@@ -20,8 +21,8 @@ type Config struct {
 	Host   string
 	DBPath string
 	APIKey string
-	// Region overrides the Kiro API region resolved from the credential store.
-	// Empty means "use the resolved region".
+	// Region pins the region used by Kiro runtime and model catalog endpoints.
+	// Empty means "use the region resolved from the credential store".
 	Region string
 	// BaseURL overrides the whole Kiro runtime endpoint, bypassing region-based
 	// URL construction. Empty means "derive from region". Intended for proxies
@@ -41,12 +42,25 @@ type Config struct {
 	// the model's behalf. Anthropic's schema-less server tools are stripped from
 	// the request either way — Kiro rejects them — so disabling this only gives
 	// up the replacement capability, never request validity.
-	WebSearch     bool
-	Debug         bool
-	OTel          bool
-	OTelBodyLimit int
-	LogFile       logging.LogFileConfig
+	WebSearch bool
+	// ModelDiscovery enables fetching Kiro's model catalog at startup so newly
+	// launched models resolve without a kirocc release. Built-in mappings always
+	// win; discovery only fills gaps.
+	ModelDiscovery bool
+	Debug          bool
+	OTel           bool
+	OTelBodyLimit  int
+	LogFile        logging.LogFileConfig
 }
+
+// regionPattern matches the region forms Kiro uses ("us-east-1",
+// "us-gov-west-1"). The value is interpolated into an API hostname, so it is
+// validated rather than trusted — a stray "/" or "@" would otherwise send
+// requests, and the bearer token with them, to an arbitrary host.
+var regionPattern = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
+
+// maxRegionLen bounds the region string; real regions are far shorter.
+const maxRegionLen = 64
 
 // DefaultDBPath returns the default kiro-cli SQLite database location.
 func DefaultDBPath() string {
@@ -72,6 +86,7 @@ func ApplyEnvOverrides(cfg *Config) error {
 	applyString("KIROCC_DB_PATH", &cfg.DBPath)
 	applyString("KIROCC_API_KEY", &cfg.APIKey)
 	applyString("KIROCC_HOST", &cfg.Host)
+	applyString("KIRO_API_REGION", &cfg.Region)
 	applyString("KIROCC_REGION", &cfg.Region)
 	applyString("KIROCC_BASE_URL", &cfg.BaseURL)
 	if err := applyInt64("KIROCC_MAX_BODY_SIZE", &cfg.MaxBodySize); err != nil {
@@ -84,6 +99,9 @@ func ApplyEnvOverrides(cfg *Config) error {
 		return err
 	}
 	if err := applyBool("KIROCC_WEB_SEARCH", &cfg.WebSearch); err != nil {
+		return err
+	}
+	if err := applyBool("KIROCC_MODEL_DISCOVERY", &cfg.ModelDiscovery); err != nil {
 		return err
 	}
 	if err := applyBool("KIROCC_DEBUG", &cfg.Debug); err != nil {
@@ -137,6 +155,11 @@ func (c *Config) Validate() error {
 		}
 		if u.Host == "" {
 			return fmt.Errorf("base-url must include a host, got %q", c.BaseURL)
+		}
+	}
+	if c.Region != "" {
+		if len(c.Region) > maxRegionLen || !regionPattern.MatchString(c.Region) {
+			return fmt.Errorf("region must be a lowercase region like us-east-1, got %q", c.Region)
 		}
 	}
 	return nil

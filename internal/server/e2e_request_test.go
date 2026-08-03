@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json/v2"
 	"io"
 	"strings"
 	"testing"
@@ -129,6 +130,45 @@ func TestE2E_ThinkingWithoutEffort_SendsDefaultEffort(t *testing.T) {
 	}
 	if amrf.OutputConfig.Effort != "medium" {
 		t.Fatalf("default effort = %q, want medium", amrf.OutputConfig.Effort)
+	}
+}
+
+// TestE2E_Opus5_RoutesAndForwardsEffort pins the full opus-5 chain: the request
+// routes to the claude-opus-5 SKU, xhigh survives the per-model effort enum
+// (opus-5 is one of the five-value models), and the response advertises the 1M
+// window Claude Code needs to skip its 200k auto-compaction.
+func TestE2E_Opus5_RoutesAndForwardsEffort(t *testing.T) {
+	p1 := mustJSON(map[string]string{"content": "OPUS5-OK"})
+	client := &capturingClient{events: []any{"assistantResponseEvent", p1}}
+
+	srv := newE2EServer(t, client)
+	defer srv.Close()
+
+	resp := postMessages(t, srv.URL, `{"model":"claude-opus-5","messages":[{"role":"user","content":"hi"}],"output_config":{"effort":"xhigh"},"stream":false}`)
+	defer func() { _ = resp.Body.Close() }()
+
+	requireStatus(t, resp, 200)
+	requireCaptured(t, client)
+
+	if got := client.captured.ConversationState.CurrentMessage.UserInputMessage.ModelID; got != "claude-opus-5" {
+		t.Errorf("upstream modelId = %q, want claude-opus-5", got)
+	}
+	amrf := client.captured.AdditionalModelRequestFields
+	if amrf == nil || amrf.OutputConfig == nil {
+		t.Fatal("expected additionalModelRequestFields.output_config to be forwarded")
+	}
+	if amrf.OutputConfig.Effort != "xhigh" {
+		t.Errorf("effort = %q, want xhigh", amrf.OutputConfig.Effort)
+	}
+
+	var body struct {
+		Model string `json:"model"`
+	}
+	if err := json.UnmarshalRead(resp.Body, &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.Model != "claude-opus-5[1m]" {
+		t.Errorf("response model = %q, want claude-opus-5[1m]", body.Model)
 	}
 }
 

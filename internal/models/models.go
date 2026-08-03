@@ -28,10 +28,12 @@ const (
 // Uses exact key matching against both Anthropic and Kiro fields (first match wins).
 // Order matters: specific entries must precede legacy aliases that share the same Kiro value.
 var modelMapOrdered = []Mapping{
+	{Anthropic: "claude-opus-5[1m]", Kiro: "claude-opus-5", Kiro1M: "claude-opus-5"},
 	{Anthropic: "claude-opus-4-8[1m]", Kiro: "claude-opus-4.8", Kiro1M: "claude-opus-4.8"},
 	{Anthropic: "claude-opus-4-7[1m]", Kiro: "claude-opus-4.7", Kiro1M: "claude-opus-4.7"},
 	{Anthropic: "claude-opus-4-6[1m]", Kiro: "claude-opus-4.6", Kiro1M: "claude-opus-4.6"},
 	{Anthropic: "claude-sonnet-5[1m]", Kiro: "claude-sonnet-5", Kiro1M: "claude-sonnet-5"},
+	{Anthropic: "claude-opus-5", Kiro: "claude-opus-5", Kiro1M: "claude-opus-5"},
 	{Anthropic: "claude-opus-4-8", Kiro: "claude-opus-4.8", Kiro1M: "claude-opus-4.8"},
 	{Anthropic: "claude-opus-4-7", Kiro: "claude-opus-4.7", Kiro1M: "claude-opus-4.7"},
 	{Anthropic: "claude-sonnet-5", Kiro: "claude-sonnet-5", Kiro1M: "claude-sonnet-5"},
@@ -85,15 +87,19 @@ func envMappings() []Mapping {
 	return mappings
 }
 
-// effectiveMappings returns env overrides followed by built-in mappings.
+// effectiveMappings returns env overrides, then built-in mappings, then any
+// mappings discovered from Kiro's catalog. First match wins, so an explicit
+// override beats a built-in and a built-in beats discovery.
 func effectiveMappings() []Mapping {
 	overrides := envMappings()
-	if len(overrides) == 0 {
+	discovered := catalogMappings()
+	if len(overrides) == 0 && len(discovered) == 0 {
 		return modelMapOrdered
 	}
-	result := make([]Mapping, 0, len(overrides)+len(modelMapOrdered))
+	result := make([]Mapping, 0, len(overrides)+len(modelMapOrdered)+len(discovered))
 	result = append(result, overrides...)
 	result = append(result, modelMapOrdered...)
+	result = append(result, discovered...)
 	return result
 }
 
@@ -235,8 +241,8 @@ func Resolve(model string, context1M bool) (kiroModel string, thinking bool, con
 	return kiroModel, thinking, contextWindowSize, anthropicModel
 }
 
-// ListModels returns a deduplicated list of all Kiro model values from
-// modelMapOrdered plus any env overrides.
+// ListModels returns a deduplicated list of all Kiro model values from env
+// overrides, the built-in table, and the discovered catalog.
 func ListModels() []string {
 	seen := make(map[string]struct{})
 	var result []string

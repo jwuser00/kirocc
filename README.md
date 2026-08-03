@@ -11,6 +11,8 @@ Just set `ANTHROPIC_BASE_URL` from any Anthropic API client (e.g., Claude Code) 
 - **Response conversion** — Converts Kiro event streams back to Anthropic SSE format
 - **Automatic auth management** — Reads credentials from Kiro CLI's SQLite DB with automatic token refresh (Social / OIDC)
 - **Model mapping** — Maps Anthropic model names (e.g., `claude-sonnet-4-6`) to Kiro model names. Customizable via environment variable
+- **Automatic model discovery** — Fetches Kiro's model catalog (`ListAvailableModels`) at startup, so models Kiro launches after a kirocc release resolve with the right context window and effort levels without a code change. Built-in mappings always win; discovery only fills gaps
+- **Custom API region** — Pin the region in `runtime.<region>.kiro.dev` with `-kiro-api-region`, for accounts whose stored credential region is not one Kiro serves
 - **Extended Thinking** — Enable via the `[1m]` suffix, the `thinking` field, or `output_config.effort`. Reasoning depth travels natively as `additionalModelRequestFields.output_config.effort` (validated against each model's enum; defaults to `medium` for effort-capable models when thinking is on without an explicit effort)
 - **Tool Search** — Proxy-side implementation of Anthropic's [Tool Search Tool](https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool). Supports `tool_search_tool_regex_20251119` and `tool_search_tool_bm25_20251119` with `defer_loading` for on-demand tool discovery
 - **Prompt Caching** — Converts Anthropic tool-level `cache_control` to Kiro `cachePoint`
@@ -120,25 +122,28 @@ systemctl --user enable --now kirocc
 
 ### Command-line options
 
-| Flag               | Default                   | Description                                                        |
-| ------------------ | ------------------------- | ------------------------------------------------------------------ |
-| `-port`            | `3456`                    | Listen port                                                        |
-| `-host`            | `127.0.0.1`               | Bind host                                                          |
-| `-db`              | (OS-dependent, see below) | Kiro CLI SQLite DB path                                            |
-| `-api-key`         | (none)                    | API key required to access the proxy                               |
-| `-region`          | (from credentials)        | Override the Kiro API region (see below)                           |
-| `-base-url`        | (from region)             | Override the Kiro runtime endpoint entirely                        |
-| `-debug`           | `false`                   | Enable debug logging                                               |
-| `-log-file`        | (none)                    | Write logs to file with rotation (file-only by default)            |
-| `-log-max-size`    | `10`                      | Max log file size in MB before rotation                            |
-| `-log-max-backups` | `5`                       | Max number of old log files to retain                              |
-| `-log-max-age`     | `7`                       | Max days to retain old log files                                   |
-| `-log-compress`    | `false`                   | Compress rotated log files with gzip                               |
-| `-log-console`     | `false`                   | Also write logs to console when `-log-file` is set                 |
-| `-otel`            | `false`                   | Enable OpenTelemetry tracing (OTLP HTTP exporter)                  |
-| `-max-body-size`   | `134217728`               | Max accepted client request body in bytes (0 = unlimited)          |
-| `-history-image-turns` | `2`                   | Earlier user turns that still replay their images on the current message (see below) |
-| `-otel-body-limit` | `32768`                   | Max bytes of request body to capture in OTel spans (0 = unlimited) |
+| Flag                       | Default                   | Description                                                               |
+| -------------------------- | ------------------------- | ------------------------------------------------------------------------- |
+| `-port`                    | `3456`                    | Listen port                                                               |
+| `-host`                    | `127.0.0.1`               | Bind host                                                                 |
+| `-db`                      | (OS-dependent, see below) | Kiro CLI SQLite DB path                                                   |
+| `-api-key`                 | (none)                    | API key required to access the proxy                                      |
+| `-region`                  | (from credentials)        | Override the Kiro API region                                              |
+| `-kiro-api-region`         | (from credentials)        | Alias for `-region`                                                       |
+| `-base-url`                | (from region)             | Override the Kiro runtime endpoint entirely                               |
+| `-model-discovery`         | `true`                    | Fetch Kiro's model catalog at startup                                     |
+| `-max-body-size`           | `134217728`               | Max accepted client request body in bytes (0 = unlimited)                 |
+| `-history-image-turns`     | `2`                       | Earlier user turns that replay their images on the current message        |
+| `-web-search`              | `true`                    | Resolve Claude WebSearch through Kiro's hosted web search                 |
+| `-debug`                   | `false`                   | Enable debug logging                                                      |
+| `-log-file`                | (none)                    | Write logs to file with rotation (file-only by default)                   |
+| `-log-max-size`            | `10`                      | Max log file size in MB before rotation                                   |
+| `-log-max-backups`         | `5`                       | Max number of old log files to retain                                     |
+| `-log-max-age`             | `7`                       | Max days to retain old log files                                          |
+| `-log-compress`            | `false`                   | Compress rotated log files with gzip                                      |
+| `-log-console`             | `false`                   | Also write logs to console when `-log-file` is set                        |
+| `-otel`                    | `false`                   | Enable OpenTelemetry tracing (OTLP HTTP exporter)                         |
+| `-otel-body-limit`         | `32768`                   | Max bytes of request body to capture in OTel spans (0 = unlimited)        |
 
 #### Images
 
@@ -197,7 +202,8 @@ later turn in the session too.
 
 #### API region
 
-The Kiro runtime endpoint is `https://runtime.<region>.kiro.dev/`. The region is
+Kiro completions use `https://runtime.<region>.kiro.dev/`, while automatic
+model discovery uses `https://management.<region>.kiro.dev/`. The region is
 resolved from the credential store, preferring the region encoded in the
 CodeWhisperer profile ARN (`api.codewhisperer.profile`), then any stored region
 field, then `us-east-1`.
@@ -207,34 +213,54 @@ differ from the OIDC/SSO region for IDC users: an Identity Center instance in
 `ap-northeast-2` may be issued a profile in `us-east-1`. Token refresh keeps
 using the OIDC region independently of this setting.
 
-Use `-region` / `KIROCC_REGION` when the resolved region is not the one you need
-(for example when the credentials carry no profile ARN). Use `-base-url` /
-`KIROCC_BASE_URL` to bypass region-based URL construction entirely, which is
-useful for putting a proxy in front of the upstream API.
+Use `-region` (or its `-kiro-api-region` alias) when the resolved region is not
+the one you need. `KIROCC_REGION` and `KIRO_API_REGION` are the corresponding
+environment variables; `KIROCC_REGION` wins when both are set. Use `-base-url`
+/ `KIROCC_BASE_URL` to bypass runtime URL construction entirely, which is useful
+for putting a proxy in front of the upstream API.
 
 ### Environment variables
 
 Command-line options can be overridden with environment variables.
 
-| Variable                 | Corresponding option |
-| ------------------------ | -------------------- |
-| `KIROCC_PORT`            | `-port`              |
-| `KIROCC_HOST`            | `-host`              |
-| `KIROCC_DB_PATH`         | `-db`                |
-| `KIROCC_API_KEY`         | `-api-key`           |
-| `KIROCC_REGION`          | `-region`            |
-| `KIROCC_BASE_URL`        | `-base-url`          |
-| `KIROCC_MAX_BODY_SIZE`   | `-max-body-size`     |
-| `KIROCC_HISTORY_IMAGE_TURNS` | `-history-image-turns` |
-| `KIROCC_DEBUG`           | `-debug`             |
-| `KIROCC_LOG_FILE`        | `-log-file`          |
-| `KIROCC_LOG_MAX_SIZE`    | `-log-max-size`      |
-| `KIROCC_LOG_MAX_BACKUPS` | `-log-max-backups`   |
-| `KIROCC_LOG_MAX_AGE`     | `-log-max-age`       |
-| `KIROCC_LOG_COMPRESS`    | `-log-compress`      |
-| `KIROCC_LOG_CONSOLE`     | `-log-console`       |
-| `KIROCC_OTEL`            | `-otel`              |
-| `KIROCC_OTEL_BODY_LIMIT` | `-otel-body-limit`   |
+| Variable                      | Corresponding option  |
+| ----------------------------- | --------------------- |
+| `KIROCC_PORT`                 | `-port`               |
+| `KIROCC_HOST`                 | `-host`               |
+| `KIROCC_DB_PATH`              | `-db`                 |
+| `KIROCC_API_KEY`              | `-api-key`            |
+| `KIROCC_REGION`               | `-region`             |
+| `KIRO_API_REGION`             | `-kiro-api-region`    |
+| `KIROCC_BASE_URL`             | `-base-url`           |
+| `KIROCC_MODEL_DISCOVERY`      | `-model-discovery`    |
+| `KIROCC_MAX_BODY_SIZE`        | `-max-body-size`      |
+| `KIROCC_HISTORY_IMAGE_TURNS`  | `-history-image-turns`|
+| `KIROCC_WEB_SEARCH`           | `-web-search`         |
+| `KIROCC_DEBUG`                | `-debug`              |
+| `KIROCC_LOG_FILE`             | `-log-file`           |
+| `KIROCC_LOG_MAX_SIZE`         | `-log-max-size`       |
+| `KIROCC_LOG_MAX_BACKUPS`      | `-log-max-backups`    |
+| `KIROCC_LOG_MAX_AGE`          | `-log-max-age`        |
+| `KIROCC_LOG_COMPRESS`         | `-log-compress`       |
+| `KIROCC_LOG_CONSOLE`          | `-log-console`        |
+| `KIROCC_OTEL`                 | `-otel`               |
+| `KIROCC_OTEL_BODY_LIMIT`      | `-otel-body-limit`    |
+
+### Automatic model discovery
+
+At startup kirocc calls Kiro's `ListAvailableModels` and installs the result as a fallback layer behind the built-in mapping table. A model Kiro launches after a kirocc release therefore resolves with its real context window and effort enum instead of falling back to pass-through defaults, and shows up in `GET /v1/models`.
+
+Resolution order is `KIROCC_MODEL_MAPPINGS` → built-in table → discovered catalog, first match wins. Built-ins deliberately win: they encode behaviour a mechanically derived entry cannot reproduce, such as which `[1m]` aliases must *not* enable extended thinking and which SKU a 1M request routes to.
+
+Discovery is best-effort and never blocks startup or fails a request. It is
+skipped when the credential has no profile ARN, since the API requires one,
+and any error leaves the built-in table in place:
+
+```
+WRN model discovery failed, using built-in model table region=ap-southeast-1 err="..."
+```
+
+Disable it with `-model-discovery=false`.
 
 ### OpenTelemetry tracing
 
@@ -282,6 +308,7 @@ flowchart TB
         MW["Middleware<br/>(OTel Tracing, Trace ID, CORS, API Key Auth)"]
         Handler["Messages Handler"]
         Auth["Auth<br/>(SQLite + Token Refresh)"]
+        Discovery["Model Discovery<br/>(startup)"]
 
         subgraph reqconv ["Request Conversion"]
             direction LR
@@ -306,12 +333,14 @@ flowchart TB
 
     subgraph Kiro ["Kiro API"]
         KiroAPI["runtime.{region}.kiro.dev"]
+        KiroMgmt["management.{region}.kiro.dev<br/>(ListAvailableModels)"]
     end
 
     CC -- "Anthropic Messages API<br/>(JSON / SSE)" --> MW
     MW --> Handler
     Handler --> Auth
     Handler --> reqconv
+    Discovery -- "model catalog<br/>(startup, best-effort)" --> KiroMgmt
     reqconv -- "Kiro Payload<br/>(JSON)" --> KiroAPI
     KiroAPI -- "AWS Event Stream<br/>(binary frames)" --> respconv
     respconv -- "Anthropic SSE / JSON" --> CC
@@ -361,7 +390,7 @@ Thinking is enabled by any of:
 - `Anthropic-Beta` header containing `context-1m` (e.g., `context-1m-2025-01-01`)
 - `thinking.type` set to `"enabled"` or `"adaptive"` in the request
 
-Exception: the `[1m]` suffix on an **always-1M** model (`claude-opus-4-8[1m]` / `claude-opus-4-7[1m]` / `claude-opus-4-6[1m]` / `claude-sonnet-5[1m]`) is a first-class alias that only advertises the 1M context window — it does **not** enable thinking (see [Model mappings](#model-mappings)). Thinking on those models is still opt-in via the `context-1m` header or the `thinking` field.
+Exception: the `[1m]` suffix on an **always-1M** model (`claude-opus-5[1m]` / `claude-opus-4-8[1m]` / `claude-opus-4-7[1m]` / `claude-opus-4-6[1m]` / `claude-sonnet-5[1m]`) is a first-class alias that only advertises the 1M context window — it does **not** enable thinking (see [Model mappings](#model-mappings)). Thinking on those models is still opt-in via the `context-1m` header or the `thinking` field.
 
 The reasoning effort sent to the backend is resolved as follows:
 
@@ -371,8 +400,9 @@ The reasoning effort sent to the backend is resolved as follows:
 
 Per-model allowed effort levels:
 
-- `claude-opus-4.8`, `claude-opus-4.7`, `claude-sonnet-5`: `low`, `medium`, `high`, `xhigh`, `max`
+- `claude-opus-5`, `claude-opus-4.8`, `claude-opus-4.7`, `claude-sonnet-5`: `low`, `medium`, `high`, `xhigh`, `max`
 - `claude-opus-4.6`, `claude-sonnet-4.6` (and their `-1m` variants): `low`, `medium`, `high`, `max` (no `xhigh`; clamps to `max`)
+- Models not listed here fall back to the enum advertised by [model discovery](#automatic-model-discovery), if any
 - All other models omit `additionalModelRequestFields` entirely
 
 `thinking.budget_tokens` is accepted in the request but no longer affects behavior; reasoning depth is conveyed entirely through `effort`.
@@ -400,6 +430,8 @@ Supported query forms:
 
 | Input model             | Kiro model             | Context window |
 | ----------------------- | ---------------------- | -------------- |
+| `claude-opus-5`         | `claude-opus-5`        | 1M             |
+| `claude-opus-5[1m]`     | `claude-opus-5`        | 1M             |
 | `claude-sonnet-5`       | `claude-sonnet-5`      | 1M             |
 | `claude-sonnet-5[1m]`   | `claude-sonnet-5`      | 1M             |
 | `claude-sonnet-4-6`     | `claude-sonnet-4.6`    | 200k           |
@@ -415,7 +447,7 @@ Supported query forms:
 | `claude-opus-4.5`       | `claude-opus-4.5`      | 200k           |
 | `claude-haiku-4.5`      | `claude-haiku-4.5`     | 200k           |
 
-Opus 4.6, 4.7, 4.8, and Sonnet 5 always use 1M context (no 200k SKU exists upstream). Unlike Sonnet 4.6, `claude-sonnet-5` has no separate `-1m` SKU: the single `claude-sonnet-5` SKU is always 1M. The explicit `[1m]`-suffixed aliases (`claude-opus-4-8[1m]` / `claude-opus-4-7[1m]` / `claude-opus-4-6[1m]` / `claude-sonnet-5[1m]`) are first-class entries that preserve the suffix verbatim in the response `model` field — this matches Claude Code's default Max-plan state (`lG()` emits `claude-opus-4-8[1m]`) and keeps its `mR()` 1M-context check happy without spuriously enabling extended thinking. Thinking is still opt-in via Sonnet `[1m]` suffix, `Anthropic-Beta: context-1m` header, or `thinking` field.
+Opus 5, 4.6, 4.7, 4.8, and Sonnet 5 always use 1M context (no 200k SKU exists upstream). Unlike Sonnet 4.6, `claude-opus-5` and `claude-sonnet-5` have no separate `-1m` SKU: the single SKU is always 1M. The explicit `[1m]`-suffixed aliases (`claude-opus-5[1m]` / `claude-opus-4-8[1m]` / `claude-opus-4-7[1m]` / `claude-opus-4-6[1m]` / `claude-sonnet-5[1m]`) are first-class entries that preserve the suffix verbatim in the response `model` field — this matches Claude Code's default Max-plan state (`lG()` emits `claude-opus-4-8[1m]`) and keeps its `mR()` 1M-context check happy without spuriously enabling extended thinking. Thinking is still opt-in via Sonnet `[1m]` suffix, `Anthropic-Beta: context-1m` header, or `thinking` field.
 
 Unmatched `claude-*` models are passed through as-is. Non-claude models fall back to `claude-sonnet-4.6`.
 

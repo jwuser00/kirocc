@@ -13,6 +13,7 @@ func TestResolveEffort(t *testing.T) {
 		{"opus-5 xhigh", "claude-opus-5", "xhigh", "xhigh"},
 		{"opus-5 max", "claude-opus-5", "max", "max"},
 		{"opus-5 low", "claude-opus-5", "low", "low"},
+		{"opus-5 invalid value dropped", "claude-opus-5", "ultra", ""},
 		{"opus-4.8 xhigh", "claude-opus-4.8", "xhigh", "xhigh"},
 		{"opus-4.8 max", "claude-opus-4.8", "max", "max"},
 		{"opus-4.8 low", "claude-opus-4.8", "low", "low"},

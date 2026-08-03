@@ -17,6 +17,29 @@ func TestResolve(t *testing.T) {
 		wantAnthropicModel string
 	}{
 		{
+			name:               "claude-opus-5 uses 1m context without thinking",
+			model:              "claude-opus-5",
+			wantKiroModel:      "claude-opus-5",
+			wantContextWindow:  ThinkingContextWindowSize,
+			wantAnthropicModel: "claude-opus-5[1m]",
+		},
+		{
+			name:               "claude-opus-5[1m] exact-match preserves suffix without thinking",
+			model:              "claude-opus-5[1m]",
+			wantKiroModel:      "claude-opus-5",
+			wantContextWindow:  ThinkingContextWindowSize,
+			wantAnthropicModel: "claude-opus-5[1m]",
+		},
+		{
+			name:               "claude-opus-5 with context1M enables thinking",
+			model:              "claude-opus-5",
+			context1M:          true,
+			wantKiroModel:      "claude-opus-5",
+			wantThinking:       true,
+			wantContextWindow:  ThinkingContextWindowSize,
+			wantAnthropicModel: "claude-opus-5[1m]",
+		},
+		{
 			name:               "claude-opus-4-8 uses 1m context without thinking",
 			model:              "claude-opus-4-8",
 			wantKiroModel:      "claude-opus-4.8",
