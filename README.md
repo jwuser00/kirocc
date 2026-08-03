@@ -57,10 +57,16 @@ Listens on `http://127.0.0.1:3456` by default.
 ```bash
 export ANTHROPIC_BASE_URL=http://127.0.0.1:3456
 export ANTHROPIC_AUTH_TOKEN=dummy
+export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
 claude
 ```
 
 `ANTHROPIC_AUTH_TOKEN` is required by Claude Code but not used for authentication by kirocc (credentials are read from Kiro CLI's DB). Any non-empty value works unless `-api-key` is set.
+
+`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` makes Claude Code 2.1.129+
+query kirocc's `GET /v1/models?limit=1000` endpoint at startup. Models returned
+by Kiro, including newly discovered Claude models, then appear in `/model` as
+`From gateway` entries.
 
 ### Run as a background service (macOS)
 
