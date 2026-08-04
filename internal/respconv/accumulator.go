@@ -2,6 +2,8 @@ package respconv
 
 import (
 	"strings"
+
+	"github.com/d-kuro/kirocc/internal/anthropic"
 )
 
 // Adapter-side stop reason constants.
@@ -114,14 +116,49 @@ func newAccumulator(contextWindowSize int, stopSequences []string, maxTokens int
 	return acc
 }
 
-// IsEmptyVisibleEndTurn reports whether the response completed with thinking
-// content but no visible text and no tool use. This indicates the upstream model
-// produced only a thinking block and the client would see an empty response.
+// IsEmptyVisibleEndTurn reports whether the response completed with nothing the
+// user would see: no visible text and no tool use.
+//
+// Two shapes qualify. The first is a thinking-only response, where the upstream
+// model produced a thinking block and stopped. The second is a response whose
+// only text is the synthetic placeholder kirocc injects into history to satisfy
+// Kiro's role alternation — the model reads that placeholder as an example of an
+// assistant turn and echoes it back, which reaches the user as a turn that says
+// nothing. Either way the caller discards and retries.
 func (a *responseAccumulator) IsEmptyVisibleEndTurn() bool {
 	if a.LocalStop {
 		return false // stop_sequence/max_tokens are not empty-response cases
 	}
-	return a.ThinkingBuf.Len() > 0 && a.TextBuf.Len() == 0 && !a.HasToolUse
+	if a.HasToolUse {
+		return false // a tool call is visible output, and retrying would drop it
+	}
+	if a.TextBuf.Len() == 0 {
+		return a.ThinkingBuf.Len() > 0
+	}
+	return anthropic.IsSyntheticEmptyEcho(a.TextBuf.String())
+}
+
+// Causes reported by EmptyVisibleCause.
+const (
+	// EmptyVisibleThinkingOnly is a response that produced a thinking block and
+	// then stopped without saying anything.
+	EmptyVisibleThinkingOnly = "thinking_only"
+	// EmptyVisibleSyntheticEcho is a response whose entire text is the synthetic
+	// placeholder kirocc injects into history, echoed back by the model.
+	EmptyVisibleSyntheticEcho = "synthetic_empty_echo"
+)
+
+// EmptyVisibleCause names why IsEmptyVisibleEndTurn is true, or "" when it is
+// not. The two causes look identical to the user but have different fixes, and
+// the echo case is invisible in a capture unless the log says which one fired.
+func (a *responseAccumulator) EmptyVisibleCause() string {
+	if !a.IsEmptyVisibleEndTurn() {
+		return ""
+	}
+	if a.TextBuf.Len() > 0 {
+		return EmptyVisibleSyntheticEcho
+	}
+	return EmptyVisibleThinkingOnly
 }
 
 // accumulateThinking applies max_tokens budget to thinking content and writes to ThinkingBuf.

@@ -9,7 +9,10 @@ import (
 )
 
 const (
-	syntheticEmpty    = "(empty)"
+	// syntheticEmpty is the filler content for turns kirocc has to invent to
+	// satisfy Kiro's role alternation. See anthropic.SyntheticEmptyText for why
+	// the exact wording matters.
+	syntheticEmpty    = anthropic.SyntheticEmptyText
 	syntheticContinue = "Continue"
 )
 
@@ -190,8 +193,8 @@ func isPlainTextContent(content anthropic.MessageContent) bool {
 	return true
 }
 
-// ensureStartsWithUser prepends a synthetic "(empty)" user message
-// if the first message is not from the user.
+// ensureStartsWithUser prepends a synthetic filler user message if the first
+// message is not from the user.
 func ensureStartsWithUser(msgs []anthropic.Message) []anthropic.Message {
 	if len(msgs) == 0 {
 		return msgs
@@ -225,7 +228,7 @@ func normalizeRoles(msgs []anthropic.Message) []anthropic.Message {
 	return msgs
 }
 
-// ensureAlternatingRoles inserts synthetic "(empty)" messages between
+// ensureAlternatingRoles inserts synthetic filler messages between
 // consecutive messages with the same role.
 func ensureAlternatingRoles(msgs []anthropic.Message) []anthropic.Message {
 	if len(msgs) <= 1 {

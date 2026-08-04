@@ -17,7 +17,7 @@ Just set `ANTHROPIC_BASE_URL` from any Anthropic API client (e.g., Claude Code) 
 - **Tool Search** — Proxy-side implementation of Anthropic's [Tool Search Tool](https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool). Supports `tool_search_tool_regex_20251119` and `tool_search_tool_bm25_20251119` with `defer_loading` for on-demand tool discovery
 - **Prompt Caching** — Converts Anthropic tool-level `cache_control` to Kiro `cachePoint`
 - **Truncation detection** — Automatically injects a notice into the next request when a response is truncated
-- **Retry** — Exponential backoff retry for 403 (token expiry), 429, and 5xx errors. Also retries thinking-only (empty visible) responses
+- **Retry** — Exponential backoff retry for 403 (token expiry), 429, and 5xx errors. Also retries responses the user would see as empty: thinking-only ones, and ones whose entire text is the synthetic role-alternation placeholder echoed back
 - **API key auth** — Optional access restriction for the proxy itself
 - **CORS** — Allows requests from localhost origins
 - **File logging** — Write structured logs (OTel JSON Lines) to a rotating file via [lumberjack](https://github.com/natefinch/lumberjack). Defaults optimized for coding agent consumption (10 MB, uncompressed)
@@ -375,7 +375,7 @@ flowchart TB
    - Parses `<thinking>` tags from `assistantResponseEvent` or uses `reasoningContentEvent` (with deduplication)
    - Enforces `stop_sequences` and `max_tokens` adapter-side
    - Detects truncated responses and stores them; a notice is injected into the next request
-   - Gate Writer buffers output until visible content arrives, enabling transparent retry of thinking-only responses
+   - Gate Writer buffers output until visible content arrives, enabling transparent retry of empty-visible responses (thinking-only, or a bare synthetic-placeholder echo)
 
 ### Extended Thinking
 

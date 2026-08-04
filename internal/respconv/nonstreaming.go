@@ -54,7 +54,8 @@ func (n *NonStreamingAccumulator) BuildResponse(model string) (map[string]any, N
 	return buildResponseFromAcc(&n.acc, model)
 }
 
-// IsEmptyVisibleEndTurn reports whether the response had thinking but no visible text or tool use.
+// IsEmptyVisibleEndTurn reports whether the response produced nothing the user
+// would see. See the responseAccumulator method for the shapes that qualify.
 func (n *NonStreamingAccumulator) IsEmptyVisibleEndTurn() bool {
 	return n.acc.IsEmptyVisibleEndTurn()
 }
@@ -62,6 +63,11 @@ func (n *NonStreamingAccumulator) IsEmptyVisibleEndTurn() bool {
 // ThinkingLen returns the length of accumulated thinking content.
 func (n *NonStreamingAccumulator) ThinkingLen() int {
 	return n.acc.ThinkingBuf.Len()
+}
+
+// EmptyVisibleCause names why IsEmptyVisibleEndTurn is true, or "" when it is not.
+func (n *NonStreamingAccumulator) EmptyVisibleCause() string {
+	return n.acc.EmptyVisibleCause()
 }
 
 // Credits returns the per-response credit consumption from meteringEvent.
@@ -104,8 +110,8 @@ func buildResponseFromAcc(acc *responseAccumulator, model string) (map[string]an
 			"text": acc.TextBuf.String(),
 		})
 	}
-	// When ThinkingBuf has content but no text or tool use, we intentionally
-	// skip injecting an empty text block. The caller detects this via
+	// When there is thinking but no text or tool use, we intentionally skip
+	// injecting an empty text block. The caller detects this via
 	// IsEmptyVisibleEndTurn and retries the request instead.
 	for _, tc := range toolCalls {
 		var input any

@@ -108,8 +108,8 @@ type toolSearchOrchestrator struct {
 }
 
 // run dispatches to the streaming or non-streaming implementation based on
-// req.Stream. Returns retryReasonEmptyVisibleEndTurn when the upstream
-// produced thinking-only output and the call site should retry.
+// req.Stream. Returns retryReasonEmptyVisibleEndTurn when the upstream produced
+// nothing the user would see and the call site should retry.
 func (o *toolSearchOrchestrator) run(ctx context.Context, w http.ResponseWriter) string {
 	if o.req.Stream {
 		return o.handleStreaming(ctx, w)
@@ -222,10 +222,11 @@ func (o *toolSearchOrchestrator) handleStreaming(ctx context.Context, w http.Res
 			if !localStop {
 				sw.Finish()
 			}
-			// Detect empty visible end_turn (thinking-only response) and signal retry.
+			// Detect a response the user would see as empty and signal retry.
 			if !localStop && sw.IsEmptyVisibleEndTurn() && !gw.IsPromoted() {
 				gw.Discard()
-				slog.WarnContext(ctx, "empty visible end_turn detected in tool search", "trace_id", short)
+				slog.WarnContext(ctx, "empty visible end_turn detected in tool search",
+					"trace_id", short, "cause", sw.EmptyVisibleCause())
 				if credits, ok := totals.creditsWith(sw.Credits()); ok {
 					logAbortedAttemptCredits(ctx, short, credits, retryReasonEmptyVisibleEndTurn)
 				}
@@ -351,9 +352,10 @@ func (o *toolSearchOrchestrator) handleNonStreaming(ctx context.Context, w http.
 				slog.WarnContext(ctx, "orchestrator round budget exhausted",
 					"trace_id", short, "tool", caught.name)
 			}
-			// Detect empty visible end_turn (thinking-only response) and signal retry.
+			// Detect a response the user would see as empty and signal retry.
 			if acc.IsEmptyVisibleEndTurn() {
-				slog.WarnContext(ctx, "empty visible end_turn detected in tool search", "trace_id", short)
+				slog.WarnContext(ctx, "empty visible end_turn detected in tool search",
+					"trace_id", short, "cause", acc.EmptyVisibleCause())
 				if totals.hasCredits {
 					logAbortedAttemptCredits(ctx, short, totals.credits, retryReasonEmptyVisibleEndTurn)
 				}

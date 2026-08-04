@@ -80,7 +80,7 @@ func (s *SSEWriter) HandleEvent(e kiroproto.Event) bool {
 		// Handle text delta.
 		if d.TextDelta != "" {
 			s.ensureStarted()
-			s.fireVisibleOutput()
+			s.fireVisibleText()
 			s.switchBlock(anthropic.BlockTypeText)
 			s.writeDelta("text_delta", "text", d.TextDelta)
 		}
@@ -187,16 +187,16 @@ func (s *SSEWriter) Finish() {
 		s.writeThinkingDelta(EventDelta{ThinkingDelta: thinkingDelta})
 	}
 	if textDelta != "" {
-		s.fireVisibleOutput()
+		s.fireVisibleText()
 		s.switchBlock(anthropic.BlockTypeText)
 		s.writeDelta("text_delta", "text", textDelta)
 	}
 
 	s.closeActiveBlock()
 
-	// Do NOT inject an empty text block here. If this is a thinking-only
-	// response, the caller (GateWriter) will detect it via IsEmptyVisibleEndTurn
-	// and retry the request instead.
+	// Do NOT inject an empty text block here. If nothing visible was produced,
+	// the caller (GateWriter) detects it via IsEmptyVisibleEndTurn and retries
+	// the request instead.
 
 	s.writeSSE("message_delta", map[string]any{
 		"type": "message_delta",
@@ -333,6 +333,14 @@ func (s *SSEWriter) writeThinkingDelta(d EventDelta) {
 
 // fireVisibleOutput calls OnVisibleOutput once when the first visible content
 // (text or tool_use) is about to be written.
+//
+// Text needs a second look before it counts as visible. A response whose whole
+// text is the synthetic-empty placeholder is retried, not delivered, so
+// promoting on its first delta would put bytes on the wire that the retry can no
+// longer take back. While the accumulated text is still a prefix of a
+// placeholder the promotion is withheld; the moment it diverges, or a tool_use
+// arrives, the gate opens and the buffer flushes intact. A stream that completes
+// as a bare placeholder never promotes, which is what lets the caller discard it.
 func (s *SSEWriter) fireVisibleOutput() {
 	if s.visibleFired {
 		return
@@ -343,8 +351,21 @@ func (s *SSEWriter) fireVisibleOutput() {
 	}
 }
 
-// IsEmptyVisibleEndTurn reports whether the completed stream had thinking
-// content but no visible text and no tool use.
+// fireVisibleText promotes on text output unless that text could still turn out
+// to be a synthetic-empty echo.
+func (s *SSEWriter) fireVisibleText() {
+	if s.visibleFired {
+		return
+	}
+	if anthropic.MayBeSyntheticEmptyEcho(s.acc.TextBuf.String()) {
+		return
+	}
+	s.fireVisibleOutput()
+}
+
+// IsEmptyVisibleEndTurn reports whether the completed stream produced nothing
+// the user would see. See the responseAccumulator method for the shapes that
+// qualify.
 func (s *SSEWriter) IsEmptyVisibleEndTurn() bool {
 	return s.acc.IsEmptyVisibleEndTurn()
 }
@@ -352,6 +373,11 @@ func (s *SSEWriter) IsEmptyVisibleEndTurn() bool {
 // ThinkingLen returns the length of accumulated thinking content.
 func (s *SSEWriter) ThinkingLen() int {
 	return s.acc.ThinkingBuf.Len()
+}
+
+// EmptyVisibleCause names why IsEmptyVisibleEndTurn is true, or "" when it is not.
+func (s *SSEWriter) EmptyVisibleCause() string {
+	return s.acc.EmptyVisibleCause()
 }
 
 // SetDropToolNames sets the tool names to filter from accumulator recording,

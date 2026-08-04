@@ -106,14 +106,15 @@ func (s *Service) handleStreamingResponse(ctx context.Context, w http.ResponseWr
 		sw.Finish()
 	}
 
-	// Detect empty visible end_turn (thinking-only response with no visible text).
-	// If the GateWriter hasn't been promoted yet, we can safely discard and retry.
+	// Detect a response the user would see as empty (thinking-only, or a bare
+	// synthetic-placeholder echo). If the GateWriter hasn't been promoted yet,
+	// we can safely discard and retry.
 	if !streamErr && !localStop && sw.IsEmptyVisibleEndTurn() && !gw.IsPromoted() {
 		gw.Discard()
 		args := []any{
 			"trace_id", short,
+			"cause", sw.EmptyVisibleCause(),
 			"thinking_chars", sw.ThinkingLen(),
-			"has_tool_use", false,
 			"retry", true,
 		}
 		args = append(args, capture.logAttrs()...)
@@ -183,12 +184,13 @@ func (s *Service) handleNonStreamingResponse(ctx context.Context, w http.Respons
 
 	resp, stats := acc.BuildResponse(model)
 
-	// Detect empty visible end_turn (thinking-only response with no visible text).
+	// Detect a response the user would see as empty (thinking-only, or a bare
+	// synthetic-placeholder echo).
 	if acc.IsEmptyVisibleEndTurn() {
 		args := []any{
 			"trace_id", short,
+			"cause", acc.EmptyVisibleCause(),
 			"thinking_chars", acc.ThinkingLen(),
-			"has_tool_use", false,
 			"retry", true,
 		}
 		args = append(args, capture.logAttrs()...)

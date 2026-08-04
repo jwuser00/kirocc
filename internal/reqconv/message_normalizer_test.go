@@ -31,7 +31,7 @@ func TestStep3_EnsureStartsWithUser(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("got %d, want 2", len(got))
 	}
-	if got[0].Role != "user" || got[0].Content.Text != "(empty)" {
+	if got[0].Role != "user" || got[0].Content.Text != syntheticEmpty {
 		t.Fatalf("got[0] = %+v", got[0])
 	}
 }
@@ -56,7 +56,7 @@ func TestStep5_EnsureAlternating(t *testing.T) {
 	if len(got) != 3 {
 		t.Fatalf("got %d, want 3", len(got))
 	}
-	if got[1].Role != "assistant" || got[1].Content.Text != "(empty)" {
+	if got[1].Role != "assistant" || got[1].Content.Text != syntheticEmpty {
 		t.Fatalf("got[1] = %+v", got[1])
 	}
 }
@@ -143,10 +143,10 @@ func TestNormalize_DeveloperRoleFirst(t *testing.T) {
 	got := Normalize(msgs, false)
 	// developer → user, then merged with next user → single user message.
 	// Then assistant follows normally.
-	// Key assertion: no synthetic "(empty)" messages should appear.
+	// Key assertion: no synthetic filler messages should appear.
 	for _, m := range got {
 		if m.Content.Text == syntheticEmpty {
-			t.Fatalf("unexpected synthetic (empty) message in normalized output: %+v", got)
+			t.Fatalf("unexpected synthetic filler message in normalized output: %+v", got)
 		}
 	}
 	// First message should be user role.
