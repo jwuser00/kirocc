@@ -129,6 +129,7 @@ install_shell_env() {
 		echo "$RC_MARKER"
 		echo "export ANTHROPIC_BASE_URL=http://127.0.0.1:$PORT"
 		echo "export ANTHROPIC_AUTH_TOKEN=dummy"
+		echo "export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1"
 		echo "$RC_MARKER_END"
 	} >>"$rc"
 	echo "   open a new terminal (or: source $rc) for it to take effect"
@@ -151,6 +152,7 @@ print_shell_env() {
 
   export ANTHROPIC_BASE_URL=http://127.0.0.1:$PORT
   export ANTHROPIC_AUTH_TOKEN=dummy
+  export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
 EOF
 }
 
