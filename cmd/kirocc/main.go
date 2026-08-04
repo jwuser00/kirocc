@@ -26,6 +26,7 @@ import (
 	"github.com/d-kuro/kirocc/internal/server"
 	"github.com/d-kuro/kirocc/internal/tokencount"
 	"github.com/d-kuro/kirocc/internal/tracing"
+	"github.com/d-kuro/kirocc/internal/webfetch"
 )
 
 func main() {
@@ -120,6 +121,9 @@ func parseFlags(args []string) (config.Config, error) {
 	fs.Int64Var(&cfg.MaxBodySize, "max-body-size", messages.DefaultMaxBodySize, "max accepted client request body in bytes (0 = unlimited)")
 	fs.IntVar(&cfg.HistoryImageTurns, "history-image-turns", reqconv.DefaultHistoryImageTurns, "how many earlier user turns still replay their images on the current message, since Kiro history cannot carry them (0 = disable replay, negative = unlimited)")
 	fs.BoolVar(&cfg.WebSearch, "web-search", true, "translate Anthropic's WebSearch server tool into the Kiro-hosted web_search tool and execute it locally (schema-less Anthropic server tools are stripped either way)")
+	fs.IntVar(&cfg.WebSearchFetch, "web-search-fetch", 3, "download this many top search-result pages and attach their readable text to the results (0 = snippets only)")
+	fs.IntVar(&cfg.WebSearchFetchBytes, "web-search-fetch-bytes", 6144, "max bytes of attached page text per fetched result")
+	fs.BoolVar(&cfg.WebSearchVisible, "web-search-visible", true, "stream executed searches to the client as server_tool_use/web_search_tool_result blocks so they render in Claude Code and persist across turns")
 	fs.BoolVar(&cfg.ModelDiscovery, "model-discovery", true, "fetch Kiro's model catalog at startup so new models resolve without a kirocc update; also KIROCC_MODEL_DISCOVERY")
 	fs.BoolVar(&cfg.Debug, "debug", false, "enable debug logging with OTel JSON Lines output")
 	fs.BoolVar(&cfg.OTel, "otel", false, "enable OpenTelemetry tracing (OTLP HTTP exporter)")
@@ -231,6 +235,10 @@ func buildServer(authMgr *auth.AuthManager, client kiroclient.Client, cfg config
 	opts = append(opts, server.WithHistoryImageTurns(cfg.HistoryImageTurns))
 	if cfg.WebSearch {
 		opts = append(opts, server.WithMCPClient(buildMCPClient(authMgr)))
+		if cfg.WebSearchFetch > 0 {
+			opts = append(opts, server.WithWebFetch(webfetch.New(), cfg.WebSearchFetch, cfg.WebSearchFetchBytes))
+		}
+		opts = append(opts, server.WithWebSearchVisible(cfg.WebSearchVisible))
 	}
 	return server.New(authMgr, cfg.APIKey, client, opts...)
 }

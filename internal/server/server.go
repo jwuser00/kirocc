@@ -8,6 +8,7 @@ import (
 	"github.com/d-kuro/kirocc/internal/kiromcp"
 	"github.com/d-kuro/kirocc/internal/reqconv"
 	"github.com/d-kuro/kirocc/internal/tracing"
+	"github.com/d-kuro/kirocc/internal/webfetch"
 )
 
 // ServerOption configures a Server.
@@ -44,6 +45,21 @@ func WithMCPClient(c kiromcp.Client) ServerOption {
 	return func(s *Server) { s.mcp = c }
 }
 
+// WithWebFetch enables enriching web-search results with fetched page content.
+func WithWebFetch(f *webfetch.Fetcher, count, perPageBytes int) ServerOption {
+	return func(s *Server) {
+		s.webFetcher = f
+		s.webFetchCount = count
+		s.webFetchBytes = perPageBytes
+	}
+}
+
+// WithWebSearchVisible controls whether searches are streamed to the client as
+// server_tool_use / web_search_tool_result blocks.
+func WithWebSearchVisible(v bool) ServerOption {
+	return func(s *Server) { s.webSearchVisible = v }
+}
+
 // Server is the HTTP server for the kirocc proxy.
 type Server struct {
 	apiKey            string
@@ -53,6 +69,10 @@ type Server struct {
 	maxBodySize       int64
 	historyImageTurns int
 	mcp               kiromcp.Client
+	webFetcher        *webfetch.Fetcher
+	webFetchCount     int
+	webFetchBytes     int
+	webSearchVisible  bool
 	mux               *http.ServeMux
 	messages          *messagesapp.Service
 }
@@ -64,6 +84,7 @@ func New(authMgr messagesapp.TokenGetter, apiKey string, client kiroclient.Clien
 		mux:               http.NewServeMux(),
 		maxBodySize:       messagesapp.DefaultMaxBodySize,
 		historyImageTurns: reqconv.DefaultHistoryImageTurns,
+		webSearchVisible:  true,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -73,6 +94,8 @@ func New(authMgr messagesapp.TokenGetter, apiKey string, client kiroclient.Clien
 		messagesapp.WithMaxBodySize(s.maxBodySize),
 		messagesapp.WithHistoryImageTurns(s.historyImageTurns),
 		messagesapp.WithMCPClient(s.mcp),
+		messagesapp.WithWebFetch(s.webFetcher, s.webFetchCount, s.webFetchBytes),
+		messagesapp.WithWebSearchVisible(s.webSearchVisible),
 	)
 	s.registerRoutes()
 	return s

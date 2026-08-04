@@ -7,6 +7,7 @@ import (
 	"github.com/d-kuro/kirocc/internal/kiroclient"
 	"github.com/d-kuro/kirocc/internal/kiromcp"
 	"github.com/d-kuro/kirocc/internal/reqconv"
+	"github.com/d-kuro/kirocc/internal/webfetch"
 )
 
 // TokenGetter loads valid upstream credentials for a request.
@@ -22,6 +23,14 @@ type Service struct {
 	captureEnabled    bool
 	maxBodySize       int64
 	historyImageTurns int
+
+	// Web-search behavior. webFetcher enriches search results with fetched
+	// page content (nil disables enrichment); webSearchVisible emits searches
+	// to the client as server_tool_use / web_search_tool_result blocks.
+	webFetcher       *webfetch.Fetcher
+	webFetchCount    int
+	webFetchBytes    int
+	webSearchVisible bool
 }
 
 // Option configures a Service.
@@ -54,6 +63,26 @@ func WithMCPClient(c kiromcp.Client) Option {
 	return func(s *Service) { s.mcp = c }
 }
 
+// WithWebFetch enables enriching search results with fetched page content:
+// the top count result URLs are downloaded and up to perPageBytes of readable
+// text is attached per result. A nil fetcher or non-positive count disables
+// enrichment, leaving snippets only.
+func WithWebFetch(f *webfetch.Fetcher, count, perPageBytes int) Option {
+	return func(s *Service) {
+		s.webFetcher = f
+		s.webFetchCount = count
+		s.webFetchBytes = perPageBytes
+	}
+}
+
+// WithWebSearchVisible controls whether executed searches are emitted to the
+// client as server_tool_use / web_search_tool_result blocks (Anthropic's
+// native shape, giving transcript persistence) or stay hidden. Defaults to
+// visible.
+func WithWebSearchVisible(v bool) Option {
+	return func(s *Service) { s.webSearchVisible = v }
+}
+
 // webSearchEnabled reports whether Kiro-hosted web search is available.
 func (s *Service) webSearchEnabled() bool { return s.mcp != nil }
 
@@ -64,6 +93,7 @@ func New(authMgr TokenGetter, client kiroclient.Client, opts ...Option) *Service
 		client:            client,
 		maxBodySize:       DefaultMaxBodySize,
 		historyImageTurns: reqconv.DefaultHistoryImageTurns,
+		webSearchVisible:  true,
 	}
 	for _, opt := range opts {
 		opt(s)

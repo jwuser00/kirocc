@@ -141,6 +141,15 @@ type ContentBlock struct {
 	// tool_reference block
 	ToolName string `json:"tool_name,omitempty"`
 
+	// web_search_result block (nested inside web_search_tool_result content)
+	Title            string `json:"title,omitempty"`
+	URL              string `json:"url,omitempty"`
+	PageAge          string `json:"page_age,omitempty"`
+	EncryptedContent string `json:"encrypted_content,omitempty"`
+
+	// web_search_tool_result_error / tool_search error content
+	ErrorCode string `json:"error_code,omitempty"`
+
 	// tool_search_tool_search_result (nested inside tool_search_tool_result content)
 	ToolReferences []ContentBlock `json:"tool_references,omitempty"`
 
@@ -189,6 +198,9 @@ const (
 	BlockTypeToolSearchSearchResult = "tool_search_tool_search_result"
 	BlockTypeToolSearchResultError  = "tool_search_tool_result_error"
 	BlockTypeRedactedThinking       = "redacted_thinking"
+	BlockTypeWebSearchToolResult    = "web_search_tool_result"
+	BlockTypeWebSearchResult        = "web_search_result"
+	BlockTypeWebSearchResultError   = "web_search_tool_result_error"
 )
 
 // Tool represents a tool definition in the Anthropic API.
@@ -199,6 +211,11 @@ type Tool struct {
 	InputSchema  map[string]any `json:"input_schema,omitempty"`
 	CacheControl *CacheControl  `json:"cache_control,omitempty"`
 	DeferLoading bool           `json:"defer_loading,omitzero"`
+
+	// WebSearch server-tool declaration options (web_search_20250305, ...).
+	MaxUses        int      `json:"max_uses,omitzero"`
+	AllowedDomains []string `json:"allowed_domains,omitempty"`
+	BlockedDomains []string `json:"blocked_domains,omitempty"`
 }
 
 // IsToolSearchTool reports whether this tool is a tool search tool definition.

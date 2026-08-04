@@ -34,27 +34,97 @@ type interception struct {
 	input string
 }
 
-// budget tracks per-tool round usage so one tool cannot starve the other.
+// roundBudget tracks per-tool usage so one tool cannot starve the other.
+// Web search is double-budgeted: rounds (extra Kiro round-trips) and queries
+// (MCP searches), because one round may fan out several parallel queries.
 type roundBudget struct {
-	toolSearch int
-	webSearch  int
+	toolSearch       int
+	webSearchRounds  int
+	webSearchQueries int
+	maxQueries       int
 }
 
-// allow reports whether another round of the named tool is permitted, counting
-// it when it is. Exhausting a budget stops interception for that tool only.
-func (b *roundBudget) allow(name string) bool {
-	if name == kiromcp.WebSearchToolName {
-		if b.webSearch >= maxWebSearchRounds {
-			return false
-		}
-		b.webSearch++
-		return true
+// newRoundBudget derives the budget, honoring the client's max_uses.
+func newRoundBudget(wsOpts *reqconv.WebSearchOptions) roundBudget {
+	b := roundBudget{maxQueries: maxWebSearchQueries}
+	if wsOpts != nil && wsOpts.MaxUses > 0 && wsOpts.MaxUses < b.maxQueries {
+		b.maxQueries = wsOpts.MaxUses
 	}
+	return b
+}
+
+// allowToolSearch reports whether another tool-search execution is permitted,
+// counting it when it is.
+func (b *roundBudget) allowToolSearch() bool {
 	if b.toolSearch >= maxToolSearchRounds {
 		return false
 	}
 	b.toolSearch++
 	return true
+}
+
+// allowWebSearchRound reports whether another web-search round is permitted,
+// counting it when it is.
+func (b *roundBudget) allowWebSearchRound() bool {
+	if b.webSearchRounds >= maxWebSearchRounds || b.webSearchQueries >= b.maxQueries {
+		return false
+	}
+	b.webSearchRounds++
+	return true
+}
+
+// takeQueries reserves up to n queries from the per-request budget and returns
+// how many were granted.
+func (b *roundBudget) takeQueries(n int) int {
+	if remaining := b.maxQueries - b.webSearchQueries; n > remaining {
+		n = remaining
+	}
+	b.webSearchQueries += n
+	return n
+}
+
+// roundPlan is the work one round's interceptions produce after budgeting.
+type roundPlan struct {
+	webQueries   []string
+	toolSearches []interception
+}
+
+// planRound turns the round's intercepted tool_uses into budgeted work. A nil
+// plan with nil error means nothing is allowed to run and the round's output
+// is final. A parse error aborts the request: the model produced an
+// undecodable tool_use and re-prompting with it would loop.
+func (o *toolSearchOrchestrator) planRound(caught []interception, budget *roundBudget) (*roundPlan, error) {
+	var plan roundPlan
+	var webInputs []string
+	for _, c := range caught {
+		if c.name == kiromcp.WebSearchToolName {
+			webInputs = append(webInputs, c.input)
+		} else if budget.allowToolSearch() {
+			plan.toolSearches = append(plan.toolSearches, c)
+		}
+	}
+	if len(webInputs) > 0 && budget.allowWebSearchRound() {
+		seen := make(map[string]struct{})
+		var queries []string
+		for _, input := range webInputs {
+			qs, err := parseWebSearchQueries(input)
+			if err != nil {
+				return nil, err
+			}
+			for _, q := range qs {
+				if _, dup := seen[q]; dup {
+					continue
+				}
+				seen[q] = struct{}{}
+				queries = append(queries, q)
+			}
+		}
+		plan.webQueries = queries[:budget.takeQueries(len(queries))]
+	}
+	if len(plan.webQueries) == 0 && len(plan.toolSearches) == 0 {
+		return nil, nil
+	}
+	return &plan, nil
 }
 
 // roundTotals accumulates per-round usage across tool-search rounds and folds
@@ -97,9 +167,11 @@ func (t roundTotals) creditsWith(credits float64, hasCredits bool) (float64, boo
 // use deferred tools, and webSearch is false when the feature is off — but
 // both share one round loop because a single response can call both.
 type toolSearchOrchestrator struct {
-	service           *Service
-	tsCtx             *toolsearch.Context
-	webSearch         bool
+	service *Service
+	tsCtx   *toolsearch.Context
+	// wsOpts is the client's WebSearch declaration; nil when web search is off
+	// (feature disabled or no declaration in the request).
+	wsOpts            *reqconv.WebSearchOptions
 	req               *anthropic.Request
 	creds             *auth.Credentials
 	buildOpts         reqconv.BuildOptions
@@ -127,7 +199,7 @@ func (o *toolSearchOrchestrator) handleStreaming(ctx context.Context, w http.Res
 	msgs := slices.Clone(o.req.Messages)
 
 	var totals roundTotals
-	var budget roundBudget
+	budget := newRoundBudget(o.wsOpts)
 
 	for round := range maxOrchestratorRounds {
 		payload, nameMap, err := o.buildPayload(msgs)
@@ -154,20 +226,26 @@ func (o *toolSearchOrchestrator) handleStreaming(ctx context.Context, w http.Res
 		}
 		sw.SetDropToolNames(o.dropToolNames()...)
 
-		var caught *interception
+		var caught []interception
 		var streamErr, localStop bool
 
 		err = kiroproto.ParseStream(ctx, apiResp.Body, func(e kiroproto.Event) bool {
 			if streamErr || localStop {
 				return true
 			}
-			// After the intercepted frame is observed, keep parsing so subsequent
-			// meteringEvent / contextUsageEvent frames flow into the accumulator.
+			// After the first intercepted frame, keep parsing: further
+			// intercepted tool_uses in the same response are collected (one
+			// answer may fan out several searches), and meteringEvent /
+			// contextUsageEvent frames still flow into the accumulator.
 			// Upstream errors in the tail must still abort the round.
-			if caught != nil {
+			if len(caught) > 0 {
 				if e.Type == kiroproto.EventException || e.Type == kiroproto.EventInvalidState {
 					streamErr = true
 					return true
+				}
+				if e.Type == kiroproto.EventToolUse && e.ToolStop && o.isIntercepted(e.ToolName) {
+					caught = append(caught, interception{name: e.ToolName, input: e.ToolInput})
+					return false
 				}
 				sw.RecordTail(e)
 				return false
@@ -177,7 +255,7 @@ func (o *toolSearchOrchestrator) handleStreaming(ctx context.Context, w http.Res
 				return true
 			}
 			if e.Type == kiroproto.EventToolUse && e.ToolStop && o.isIntercepted(e.ToolName) {
-				caught = &interception{name: e.ToolName, input: e.ToolInput}
+				caught = append(caught, interception{name: e.ToolName, input: e.ToolInput})
 				return false
 			}
 			shouldStop := sw.HandleEvent(e)
@@ -213,10 +291,16 @@ func (o *toolSearchOrchestrator) handleStreaming(ctx context.Context, w http.Res
 			return ""
 		}
 
-		if caught == nil || !budget.allow(caught.name) {
-			if caught != nil {
+		plan, planErr := o.planRound(caught, &budget)
+		if planErr != nil {
+			slog.WarnContext(ctx, "web search input parse error", "trace_id", short, "err", planErr)
+			writeStreamingOrJSONError(gw, sw, w, http.StatusBadRequest, errTypeInvalidRequest, planErr.Error())
+			return ""
+		}
+		if plan == nil {
+			if len(caught) > 0 {
 				slog.WarnContext(ctx, "orchestrator round budget exhausted",
-					"trace_id", short, "tool", caught.name)
+					"trace_id", short, "tool", caught[0].name)
 			}
 			// streamErr was already handled above; only success/localStop reach here.
 			if !localStop {
@@ -239,41 +323,54 @@ func (o *toolSearchOrchestrator) handleStreaming(ctx context.Context, w http.Res
 			return ""
 		}
 
-		if caught.name == kiromcp.WebSearchToolName {
-			// Web search is invisible to the client: no SSE blocks are emitted,
-			// so Claude Code sees only the answer the results produced.
-			query, parseErr := parseWebSearchInput(caught.input)
+		if len(plan.webQueries) > 0 {
+			// The preamble must be read before the searches run: it is this
+			// round's already-streamed text, carried into the history so the
+			// next round does not repeat it.
+			preamble := sw.Text()
+			// Emit the server_tool_use blocks before running the searches so
+			// the client shows them while the search+fetch is in flight.
+			srvIDs := make([]string, len(plan.webQueries))
+			for i, q := range plan.webQueries {
+				srvIDs[i] = "srvtoolu_" + uuid.New().String()[:24]
+				if o.service.webSearchVisible {
+					inputBytes, _ := json.Marshal(map[string]any{"query": q})
+					sw.WriteServerToolUse(srvIDs[i], kiromcp.WebSearchToolName, string(inputBytes))
+				}
+			}
+			calls := o.executeWebSearches(ctx, short, round, plan.webQueries)
+			for i := range calls {
+				calls[i].srvID = srvIDs[i]
+				if o.service.webSearchVisible {
+					sw.WriteWebSearchResult(calls[i].srvID, webSearchResultContent(calls[i]))
+				}
+			}
+			msgs = appendWebSearchMessages(msgs, preamble, calls)
+		}
+
+		for _, ts := range plan.toolSearches {
+			// ToolSearch detected — execute search and emit SSE blocks.
+			query, maxResults, parseErr := parseToolSearchInput(ts.input)
 			if parseErr != nil {
-				slog.WarnContext(ctx, "web search input parse error", "trace_id", short, "err", parseErr)
+				slog.WarnContext(ctx, "tool search input parse error", "trace_id", short, "err", parseErr)
 				writeStreamingOrJSONError(gw, sw, w, http.StatusBadRequest, errTypeInvalidRequest, parseErr.Error())
 				return ""
 			}
-			resultText, isErr := o.executeWebSearch(ctx, short, round, query)
-			msgs = appendWebSearchMessages(msgs, newWebSearchToolUseID(), query, resultText, isErr)
-			continue
+			srvToolUseID := "srvtoolu_" + uuid.New().String()[:24]
+			searchInput := buildSearchInput(query, maxResults)
+
+			inputBytes, _ := json.Marshal(searchInput)
+			sw.WriteServerToolUse(srvToolUseID, o.tsCtx.SearchToolName, string(inputBytes))
+
+			results, searchErr := o.executeSearch(ctx, short, round, query, maxResults)
+			if searchErr != nil {
+				sw.WriteToolSearchError(srvToolUseID, toolsearch.ErrorCode(searchErr))
+			} else {
+				sw.WriteToolSearchResult(srvToolUseID, results)
+			}
+
+			msgs = o.appendSearchMessages(msgs, srvToolUseID, searchInput, results, searchErr, nameMap)
 		}
-
-		// ToolSearch detected — execute search and emit SSE blocks.
-		query, maxResults, parseErr := parseToolSearchInput(caught.input)
-		if parseErr != nil {
-			slog.WarnContext(ctx, "tool search input parse error", "trace_id", short, "err", parseErr)
-			writeStreamingOrJSONError(gw, sw, w, http.StatusBadRequest, errTypeInvalidRequest, parseErr.Error())
-			return ""
-		}
-		srvToolUseID := "srvtoolu_" + uuid.New().String()[:24]
-		searchInput := buildSearchInput(query, maxResults)
-
-		inputBytes, _ := json.Marshal(searchInput)
-		sw.WriteServerToolUse(srvToolUseID, o.tsCtx.SearchToolName, string(inputBytes))
-
-		results, searchErr := o.executeSearch(ctx, short, round, query, maxResults)
-		if searchErr != nil {
-			sw.WriteToolSearchError(srvToolUseID, toolsearch.ErrorCode(searchErr))
-		} else {
-			sw.WriteToolSearchResult(srvToolUseID, results)
-		}
-
-		msgs = o.appendSearchMessages(msgs, srvToolUseID, searchInput, results, searchErr, nameMap)
 	}
 
 	// Max rounds reached without normal completion.
@@ -297,7 +394,7 @@ func (o *toolSearchOrchestrator) handleNonStreaming(ctx context.Context, w http.
 	var lastStopSequence any
 
 	var normalExit bool
-	var budget roundBudget
+	budget := newRoundBudget(o.wsOpts)
 
 	for round := range maxOrchestratorRounds {
 		payload, nameMap, err := o.buildPayload(msgs)
@@ -318,22 +415,23 @@ func (o *toolSearchOrchestrator) handleNonStreaming(ctx context.Context, w http.
 		acc.SetToolNameMap(nameMap.ReverseMap())
 
 		var hasError bool
-		var caught *interception
+		var caught []interception
 		err = kiroproto.ParseStream(ctx, apiResp.Body, func(e kiroproto.Event) bool {
 			d := acc.ProcessEvent(e)
 			if d.IsError {
 				hasError = true
 				return true
 			}
-			// Detect filtered tool_use (ToolSearch, web_search) via EventDelta.
+			// Collect filtered tool_uses (ToolSearch, web_search) via EventDelta;
+			// one response may fan out several searches.
 			if d.ToolStop && o.isIntercepted(d.ToolName) {
-				caught = &interception{name: d.ToolName, input: d.ToolInput}
+				caught = append(caught, interception{name: d.ToolName, input: d.ToolInput})
 			}
 			return false
 		})
 		_ = apiResp.Body.Close()
 
-		if (err != nil || hasError) && caught == nil {
+		if (err != nil || hasError) && len(caught) == 0 {
 			httpx.WriteError(w, http.StatusBadGateway, errTypeAPI, "upstream error")
 			return ""
 		}
@@ -343,14 +441,21 @@ func (o *toolSearchOrchestrator) handleNonStreaming(ctx context.Context, w http.
 		lastStopReason, _ = resp["stop_reason"].(string)
 		lastStopSequence = resp["stop_sequence"]
 
-		// Extract content blocks (ToolSearch won't appear here since it's filtered).
+		// Extract content blocks (intercepted tools won't appear here since
+		// they're filtered).
 		content, _ := resp["content"].([]any)
 		orderedBlocks = append(orderedBlocks, content...)
 
-		if caught == nil || !budget.allow(caught.name) {
-			if caught != nil {
+		plan, planErr := o.planRound(caught, &budget)
+		if planErr != nil {
+			slog.WarnContext(ctx, "web search input parse error", "trace_id", short, "err", planErr)
+			httpx.WriteError(w, http.StatusBadRequest, errTypeInvalidRequest, planErr.Error())
+			return ""
+		}
+		if plan == nil {
+			if len(caught) > 0 {
 				slog.WarnContext(ctx, "orchestrator round budget exhausted",
-					"trace_id", short, "tool", caught.name)
+					"trace_id", short, "tool", caught[0].name)
 			}
 			// Detect a response the user would see as empty and signal retry.
 			if acc.IsEmptyVisibleEndTurn() {
@@ -365,62 +470,74 @@ func (o *toolSearchOrchestrator) handleNonStreaming(ctx context.Context, w http.
 			break
 		}
 
-		if caught.name == kiromcp.WebSearchToolName {
-			// No blocks are added to orderedBlocks: the search stays invisible
-			// to the client, exactly as in the streaming path.
-			query, parseErr := parseWebSearchInput(caught.input)
+		if len(plan.webQueries) > 0 {
+			calls := o.executeWebSearches(ctx, short, round, plan.webQueries)
+			if o.service.webSearchVisible {
+				for i := range calls {
+					calls[i].srvID = "srvtoolu_" + uuid.New().String()[:24]
+					call := calls[i]
+					orderedBlocks = append(orderedBlocks,
+						map[string]any{
+							"type":  anthropic.BlockTypeServerToolUse,
+							"id":    call.srvID,
+							"name":  kiromcp.WebSearchToolName,
+							"input": map[string]any{"query": call.query},
+						},
+						map[string]any{
+							"type":        anthropic.BlockTypeWebSearchToolResult,
+							"tool_use_id": call.srvID,
+							"content":     webSearchResultContent(call),
+						},
+					)
+				}
+			}
+			msgs = appendWebSearchMessages(msgs, textOfContentBlocks(content), calls)
+		}
+
+		for _, ts := range plan.toolSearches {
+			// Execute search.
+			query, maxResults, parseErr := parseToolSearchInput(ts.input)
 			if parseErr != nil {
-				slog.WarnContext(ctx, "web search input parse error", "trace_id", short, "err", parseErr)
+				slog.WarnContext(ctx, "tool search input parse error", "trace_id", short, "err", parseErr)
 				httpx.WriteError(w, http.StatusBadRequest, errTypeInvalidRequest, parseErr.Error())
 				return ""
 			}
-			resultText, isErr := o.executeWebSearch(ctx, short, round, query)
-			msgs = appendWebSearchMessages(msgs, newWebSearchToolUseID(), query, resultText, isErr)
-			continue
-		}
 
-		// Execute search.
-		query, maxResults, parseErr := parseToolSearchInput(caught.input)
-		if parseErr != nil {
-			slog.WarnContext(ctx, "tool search input parse error", "trace_id", short, "err", parseErr)
-			httpx.WriteError(w, http.StatusBadRequest, errTypeInvalidRequest, parseErr.Error())
-			return ""
-		}
+			srvToolUseID := "srvtoolu_" + uuid.New().String()[:24]
+			results, searchErr := o.executeSearch(ctx, short, round, query, maxResults)
 
-		srvToolUseID := "srvtoolu_" + uuid.New().String()[:24]
-		results, searchErr := o.executeSearch(ctx, short, round, query, maxResults)
-
-		// Add server_tool_use block.
-		searchInput := buildSearchInput(query, maxResults)
-		orderedBlocks = append(orderedBlocks, map[string]any{
-			"type":  anthropic.BlockTypeServerToolUse,
-			"id":    srvToolUseID,
-			"name":  o.tsCtx.SearchToolName,
-			"input": searchInput,
-		})
-
-		// Add tool_search_tool_result block.
-		if searchErr != nil {
+			// Add server_tool_use block.
+			searchInput := buildSearchInput(query, maxResults)
 			orderedBlocks = append(orderedBlocks, map[string]any{
-				"type":        anthropic.BlockTypeToolSearchToolResult,
-				"tool_use_id": srvToolUseID,
-				"content": map[string]any{
-					"type":       anthropic.BlockTypeToolSearchResultError,
-					"error_code": toolsearch.ErrorCode(searchErr),
-				},
+				"type":  anthropic.BlockTypeServerToolUse,
+				"id":    srvToolUseID,
+				"name":  o.tsCtx.SearchToolName,
+				"input": searchInput,
 			})
-		} else {
-			orderedBlocks = append(orderedBlocks, map[string]any{
-				"type":        anthropic.BlockTypeToolSearchToolResult,
-				"tool_use_id": srvToolUseID,
-				"content": map[string]any{
-					"type":            anthropic.BlockTypeToolSearchSearchResult,
-					"tool_references": toolsearch.ToolRefMaps(results),
-				},
-			})
-		}
 
-		msgs = o.appendSearchMessages(msgs, srvToolUseID, searchInput, results, searchErr, nameMap)
+			// Add tool_search_tool_result block.
+			if searchErr != nil {
+				orderedBlocks = append(orderedBlocks, map[string]any{
+					"type":        anthropic.BlockTypeToolSearchToolResult,
+					"tool_use_id": srvToolUseID,
+					"content": map[string]any{
+						"type":       anthropic.BlockTypeToolSearchResultError,
+						"error_code": toolsearch.ErrorCode(searchErr),
+					},
+				})
+			} else {
+				orderedBlocks = append(orderedBlocks, map[string]any{
+					"type":        anthropic.BlockTypeToolSearchToolResult,
+					"tool_use_id": srvToolUseID,
+					"content": map[string]any{
+						"type":            anthropic.BlockTypeToolSearchSearchResult,
+						"tool_references": toolsearch.ToolRefMaps(results),
+					},
+				})
+			}
+
+			msgs = o.appendSearchMessages(msgs, srvToolUseID, searchInput, results, searchErr, nameMap)
+		}
 	}
 
 	// Max rounds reached without normal completion.
@@ -498,6 +615,23 @@ func (o *toolSearchOrchestrator) appendSearchMessages(msgs []anthropic.Message, 
 			}},
 		},
 	)
+}
+
+// textOfContentBlocks joins the text of block maps produced by BuildResponse.
+// The non-streaming path uses it to recover the round's preamble text for the
+// synthetic web-search history.
+func textOfContentBlocks(content []any) string {
+	var sb strings.Builder
+	for _, c := range content {
+		m, ok := c.(map[string]any)
+		if !ok || m["type"] != anthropic.BlockTypeText {
+			continue
+		}
+		if t, ok := m["text"].(string); ok {
+			sb.WriteString(t)
+		}
+	}
+	return sb.String()
 }
 
 // buildSearchInput constructs the input map for a ToolSearch tool_use.
