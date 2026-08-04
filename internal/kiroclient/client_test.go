@@ -638,6 +638,13 @@ func TestUpstreamError_XAmznErrorTypeHeader(t *testing.T) {
 	}
 }
 
+func TestHTTPClient_DefaultBodyReadIdleTimeout(t *testing.T) {
+	c := NewHTTPClient()
+	if got, want := c.bodyReadIdleTimeout(), 10*time.Minute; got != want {
+		t.Fatalf("bodyReadIdleTimeout() = %v, want %v", got, want)
+	}
+}
+
 // TestHTTPClient_BodyReadIdleTimeout verifies that when the Kiro API returns
 // 200 with eventstream headers but then stops sending data, the idle watchdog
 // fires and surfaces an error through ParseStream.

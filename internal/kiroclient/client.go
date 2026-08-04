@@ -65,7 +65,7 @@ type TokenRefresher func(ctx context.Context) (newToken string, err error)
 // hangs where the server sends eventstream headers but never delivers frames.
 var ErrBodyReadIdle = errors.New("kiroclient: body read idle timeout")
 
-const defaultBodyReadIdleTimeout = 180 * time.Second
+const defaultBodyReadIdleTimeout = 10 * time.Minute
 
 // HTTPClient is the production implementation of Client.
 type HTTPClient struct {
