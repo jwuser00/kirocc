@@ -266,10 +266,16 @@ func TestE2E_Truncation_Content(t *testing.T) {
 	}
 }
 
-func TestE2E_PreCountedTokens_NonStreaming(t *testing.T) {
+func TestE2E_PreCountedTokens_WithEmptyMetadata_NonStreaming(t *testing.T) {
 	p1 := mustJSON(map[string]string{"content": "hello"})
+	emptyMeta := mustJSON(map[string]any{})
+	contextUsage := mustJSON(map[string]any{"contextUsagePercentage": 0.7})
 	client := &capturingClient{
-		events:       []any{"assistantResponseEvent", p1},
+		events: []any{
+			"assistantResponseEvent", p1,
+			"metadataEvent", emptyMeta,
+			"contextUsageEvent", contextUsage,
+		},
 		promptTokens: 500,
 	}
 
@@ -289,10 +295,16 @@ func TestE2E_PreCountedTokens_NonStreaming(t *testing.T) {
 	}
 }
 
-func TestE2E_PreCountedTokens_Streaming(t *testing.T) {
+func TestE2E_PreCountedTokens_WithEmptyMetadata_Streaming(t *testing.T) {
 	p1 := mustJSON(map[string]string{"content": "hello"})
+	emptyMeta := mustJSON(map[string]any{})
+	contextUsage := mustJSON(map[string]any{"contextUsagePercentage": 0.7})
 	client := &capturingClient{
-		events:       []any{"assistantResponseEvent", p1},
+		events: []any{
+			"assistantResponseEvent", p1,
+			"metadataEvent", emptyMeta,
+			"contextUsageEvent", contextUsage,
+		},
 		promptTokens: 750,
 	}
 
@@ -311,10 +323,16 @@ func TestE2E_PreCountedTokens_Streaming(t *testing.T) {
 	}
 }
 
-func TestE2E_PreCountedTokens_ZeroFallback(t *testing.T) {
+func TestE2E_ContextUsageFallback_WhenPreCountIsZero(t *testing.T) {
 	p1 := mustJSON(map[string]string{"content": "hello"})
+	emptyMeta := mustJSON(map[string]any{})
+	contextUsage := mustJSON(map[string]any{"contextUsagePercentage": 10.0})
 	client := &capturingClient{
-		events:       []any{"assistantResponseEvent", p1},
+		events: []any{
+			"assistantResponseEvent", p1,
+			"metadataEvent", emptyMeta,
+			"contextUsageEvent", contextUsage,
+		},
 		promptTokens: 0, // simulates tokencount failure
 	}
 
@@ -329,8 +347,11 @@ func TestE2E_PreCountedTokens_ZeroFallback(t *testing.T) {
 	var result map[string]any
 	_ = json.UnmarshalRead(resp.Body, &result)
 	usage := result["usage"].(map[string]any)
-	if int(usage["input_tokens"].(float64)) != 0 {
-		t.Fatalf("input_tokens = %v, want 0 (fallback)", usage["input_tokens"])
+	if int(usage["input_tokens"].(float64)) != 19999 {
+		t.Fatalf("input_tokens = %v, want 19999 (context usage fallback)", usage["input_tokens"])
+	}
+	if int(usage["output_tokens"].(float64)) != 1 {
+		t.Fatalf("output_tokens = %v, want 1 (estimated fallback)", usage["output_tokens"])
 	}
 }
 
@@ -628,5 +649,35 @@ func TestE2E_Success_DoesNotSaveFailureCapture(t *testing.T) {
 
 	if strings.Contains(logBuf.String(), "upstream failure capture") {
 		t.Fatal("capture log should not appear on success")
+	}
+}
+
+func TestE2E_GPTDrainAfterLocalStop_UpstreamErrorEndsStream(t *testing.T) {
+	// GPT drain regression: after a tool-use max_tokens local stop, the stream
+	// keeps draining for a trailing reasoning blob. An upstream error frame
+	// arriving mid-drain must terminate the stream as an error, not be
+	// swallowed as a normal local stop that reports a clean max_tokens end.
+	toolUse := mustJSON(map[string]any{
+		"name": "read", "toolUseId": "call_1",
+		"input": `{"path":"/tmp/some/long/path/exceeding/budget"}`, "stop": true,
+	})
+	invalidState := mustJSON(map[string]string{"reason": "UNEXPECTED", "message": "boom"})
+	client := &capturingClient{events: []any{
+		"toolUseEvent", toolUse,
+		"invalidStateEvent", invalidState,
+	}}
+	srv := newE2EServer(t, client)
+	defer srv.Close()
+
+	// max_tokens: 1 → 4-rune budget; the tool input exceeds it → LocalStop.
+	body := `{"model":"gpt-5.6-sol","max_tokens":1,"messages":[{"role":"user","content":"hi"}],"tools":[{"name":"read","input_schema":{"type":"object"}}],"stream":true}`
+	resp := postMessages(t, srv.URL, body)
+	defer func() { _ = resp.Body.Close() }()
+	requireStatus(t, resp, 200)
+
+	data, _ := io.ReadAll(resp.Body)
+	sse := string(data)
+	if !strings.Contains(sse, "event: error") {
+		t.Fatalf("upstream error mid-drain was not reported as an error event: %s", sse)
 	}
 }

@@ -2,6 +2,8 @@ package respconv
 
 import (
 	"context"
+	"errors"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -15,7 +17,7 @@ func TestSSEWriter_TextOnly(t *testing.T) {
 
 	sw.HandleEvent(kiroproto.Event{Type: "assistantResponseEvent", Content: "Hello"})
 	sw.HandleEvent(kiroproto.Event{Type: "assistantResponseEvent", Content: "Hello world"})
-	sw.Finish()
+	_ = sw.Finish()
 
 	body := w.Body.String()
 	if !strings.Contains(body, "event: message_start\n") {
@@ -48,7 +50,7 @@ func TestSSEWriter_ThinkingWithSignature(t *testing.T) {
 	sw.HandleEvent(kiroproto.Event{Type: "reasoningContentEvent", ThinkingText: "Let me", Signature: "sig_abc123"})
 	sw.HandleEvent(kiroproto.Event{Type: "reasoningContentEvent", ThinkingText: "Let me think"})
 	sw.HandleEvent(kiroproto.Event{Type: "assistantResponseEvent", Content: "Answer"})
-	sw.Finish()
+	_ = sw.Finish()
 
 	body := w.Body.String()
 	if !strings.Contains(body, `"signature":"sig_abc123"`) {
@@ -74,7 +76,7 @@ func TestSSEWriter_ToolUse(t *testing.T) {
 		Type: "toolUseEvent", ToolStop: true,
 		ToolUseID: "toolu_01", ToolName: "get_weather", ToolInput: `{"city":"Tokyo"}`,
 	})
-	sw.Finish()
+	_ = sw.Finish()
 
 	body := w.Body.String()
 	if !strings.Contains(body, `"stop_reason":"tool_use"`) {
@@ -104,7 +106,7 @@ func TestSSEWriter_InvalidState_PreStream(t *testing.T) {
 	}
 }
 
-func TestSSEWriter_InvalidState_MidStream(t *testing.T) {
+func TestSSEWriter_InvalidState_MidStreamLeavesErrorOutputToCaller(t *testing.T) {
 	w := httptest.NewRecorder()
 	sw := NewSSEWriter(context.Background(), w, "claude-sonnet-4.6", 200000, nil, 0, 0)
 
@@ -116,8 +118,42 @@ func TestSSEWriter_InvalidState_MidStream(t *testing.T) {
 		t.Fatal("expected error return")
 	}
 	body := w.Body.String()
-	if !strings.Contains(body, `"invalid_state"`) {
-		t.Fatal("missing error event in stream")
+	if strings.Contains(body, "event: error") {
+		t.Fatal("SSEWriter must leave final error classification/output to the stream session")
+	}
+}
+
+type failingSSEWriter struct {
+	header http.Header
+	err    error
+}
+
+func (w *failingSSEWriter) Header() http.Header { return w.header }
+func (w *failingSSEWriter) WriteHeader(int)     {}
+func (w *failingSSEWriter) Write([]byte) (int, error) {
+	return 0, w.err
+}
+
+func TestSSEWriter_StoresConcreteWriteError(t *testing.T) {
+	wantErr := errors.New("downstream write failed")
+	w := &failingSSEWriter{header: make(http.Header), err: wantErr}
+	sw := NewSSEWriter(context.Background(), w, "claude-sonnet-4.6", 200000, nil, 0, 0)
+
+	sw.HandleEvent(kiroproto.Event{Type: "assistantResponseEvent", Content: "Hello"})
+	if !errors.Is(sw.WriteErr(), wantErr) {
+		t.Fatalf("WriteErr() = %v, want %v", sw.WriteErr(), wantErr)
+	}
+}
+
+func TestSSEWriter_StoresPromotionError(t *testing.T) {
+	wantErr := errors.New("promote flush failed")
+	w := httptest.NewRecorder()
+	sw := NewSSEWriter(context.Background(), w, "claude-sonnet-4.6", 200000, nil, 0, 0)
+	sw.OnVisibleOutput = func() error { return wantErr }
+
+	sw.HandleEvent(kiroproto.Event{Type: "assistantResponseEvent", Content: "Hello"})
+	if !errors.Is(sw.WriteErr(), wantErr) {
+		t.Fatalf("WriteErr() = %v, want %v", sw.WriteErr(), wantErr)
 	}
 }
 
@@ -130,7 +166,7 @@ func TestSSEWriter_MetadataEvent(t *testing.T) {
 		CacheReadInputTokens: 20, CacheWriteInputTokens: 10,
 	})
 	sw.HandleEvent(kiroproto.Event{Type: "assistantResponseEvent", Content: "Hi"})
-	sw.Finish()
+	_ = sw.Finish()
 
 	input, output := sw.Usage()
 	if input != 100 || output != 50 {
@@ -152,7 +188,7 @@ func TestSSEWriter_Credits(t *testing.T) {
 
 	sw.HandleEvent(kiroproto.Event{Type: "meteringEvent", Credits: 0.5417})
 	sw.HandleEvent(kiroproto.Event{Type: "assistantResponseEvent", Content: "Hi"})
-	sw.Finish()
+	_ = sw.Finish()
 
 	credits, ok := sw.Credits()
 	if !ok {
@@ -192,7 +228,7 @@ func TestSSEWriter_RedactedContent(t *testing.T) {
 
 	sw.HandleEvent(kiroproto.Event{Type: "reasoningContentEvent", RedactedContent: "base64data"})
 	sw.HandleEvent(kiroproto.Event{Type: "assistantResponseEvent", Content: "Answer"})
-	sw.Finish()
+	_ = sw.Finish()
 
 	body := w.Body.String()
 	if !strings.Contains(body, `"redacted_thinking"`) {
@@ -210,7 +246,7 @@ func TestSSEWriter_NoOpEvents(t *testing.T) {
 	// These should not cause any output or errors.
 	sw.HandleEvent(kiroproto.Event{Type: "followupPromptEvent"})
 	sw.HandleEvent(kiroproto.Event{Type: "assistantResponseEvent", Content: "Hi"})
-	sw.Finish()
+	_ = sw.Finish()
 
 	body := w.Body.String()
 	if !strings.Contains(body, `"Hi"`) {
@@ -227,7 +263,7 @@ func TestSSEWriter_ThinkingViaTags(t *testing.T) {
 		Type:    "assistantResponseEvent",
 		Content: "<thinking>Step 1: analyze the problem</thinking>The answer is 42",
 	})
-	sw.Finish()
+	_ = sw.Finish()
 
 	body := w.Body.String()
 	// Should have thinking block.
@@ -262,7 +298,7 @@ func TestSSEWriter_ThinkingOnly_ViaTags(t *testing.T) {
 		Type:    "assistantResponseEvent",
 		Content: "<thinking>Let me reason through this</thinking>",
 	})
-	sw.Finish()
+	_ = sw.Finish()
 
 	body := w.Body.String()
 	if !strings.Contains(body, `"thinking_delta"`) {
@@ -286,7 +322,7 @@ func TestSSEWriter_ThinkingOnly_ViaReasoningEvent(t *testing.T) {
 
 	// Only a reasoning content event — no text, no regular tool.
 	sw.HandleEvent(kiroproto.Event{Type: "reasoningContentEvent", ThinkingText: "Thinking...", Signature: "sig_x"})
-	sw.Finish()
+	_ = sw.Finish()
 
 	body := w.Body.String()
 	if !strings.Contains(body, `"thinking_delta"`) {
@@ -317,7 +353,7 @@ func TestSSEWriter_ThinkingWithToolUse_NoTextInjection(t *testing.T) {
 		ToolUseID: "t2", ToolName: "bash",
 		ToolInput: `{"cmd":"ls"}`,
 	})
-	sw.Finish()
+	_ = sw.Finish()
 
 	body := w.Body.String()
 	if !strings.Contains(body, `"stop_reason":"tool_use"`) {
@@ -344,7 +380,7 @@ func TestSSEWriter_ThinkingViaTags_WithRegularTool(t *testing.T) {
 		ToolUseID: "t2", ToolName: "bash",
 		ToolInput: `{"cmd":"ls"}`,
 	})
-	sw.Finish()
+	_ = sw.Finish()
 
 	body := w.Body.String()
 	if !strings.Contains(body, `"thinking_delta"`) {
@@ -355,5 +391,109 @@ func TestSSEWriter_ThinkingViaTags_WithRegularTool(t *testing.T) {
 	}
 	if !strings.Contains(body, `"stop_reason":"tool_use"`) {
 		t.Fatal("expected tool_use stop_reason")
+	}
+}
+
+func TestSSEWriter_RecordTail_RedactedContent(t *testing.T) {
+	w := httptest.NewRecorder()
+	sw := NewSSEWriter(context.Background(), w, "gpt-5.6-sol", 272000, nil, 0, 100)
+	bodyBefore := w.Body.Len()
+	redacted := strings.Repeat("A", 400)
+
+	// Trailing redacted blob after the tool-search frame must be accumulated
+	// for next-round replay, without writing anything to the SSE stream.
+	sw.RecordTail(kiroproto.Event{Type: kiroproto.EventReasoningContent, RedactedContent: redacted})
+
+	if w.Body.Len() != bodyBefore {
+		t.Fatalf("RecordTail wrote SSE bytes (%d → %d)", bodyBefore, w.Body.Len())
+	}
+	got := sw.RedactedContents()
+	if len(got) != 1 || got[0] != redacted {
+		t.Fatalf("RedactedContents() = %v, want one 400-rune blob", got)
+	}
+	inputTokens, outputTokens := sw.Usage()
+	if inputTokens != 100 || outputTokens < 1 {
+		t.Fatalf("Usage() = (%d, %d), want (100, >=1)", inputTokens, outputTokens)
+	}
+}
+
+func TestSSEWriter_MaxTokensWithToolUse_DrainsTrailingBlob(t *testing.T) {
+	w := httptest.NewRecorder()
+	// budget 1 token = 4 runes; the tool input exceeds it → LocalStop.
+	sw := NewSSEWriter(context.Background(), w, "gpt-5.6-sol", 272000, nil, 1, 0)
+	sw.SetDrainOnStop(true)
+
+	stopped := sw.HandleEvent(kiroproto.Event{Type: "toolUseEvent", ToolStop: true, ToolUseID: "call_1", ToolName: "read", ToolInput: `{"path":"/tmp/somewhere"}`})
+	if stopped {
+		t.Fatal("HandleEvent must not terminate on max_tokens when a completed tool call exists (drain trailing blob)")
+	}
+	if !sw.LocalStop() {
+		t.Fatal("expected LocalStop after budget exceeded")
+	}
+	// Trailing blob arrives after the tool_use frame — must still be emitted.
+	sw.HandleEvent(kiroproto.Event{Type: kiroproto.EventReasoningContent, RedactedContent: "late-blob"})
+	_ = sw.Finish()
+
+	body := w.Body.String()
+	if !strings.Contains(body, `"redacted_thinking"`) || !strings.Contains(body, `"late-blob"`) {
+		t.Fatalf("missing trailing redacted_thinking block: %s", body)
+	}
+	if !strings.Contains(body, `"stop_reason":"max_tokens"`) {
+		t.Fatalf("stop_reason should stay max_tokens: %s", body)
+	}
+	if !strings.Contains(body, "message_stop") {
+		t.Fatalf("missing message_stop: %s", body)
+	}
+}
+
+func TestSSEWriter_MaxTokensTextOnly_StopsImmediately(t *testing.T) {
+	w := httptest.NewRecorder()
+	sw := NewSSEWriter(context.Background(), w, "claude-sonnet-4.6", 200000, nil, 1, 0)
+
+	stopped := sw.HandleEvent(kiroproto.Event{Type: "assistantResponseEvent", Content: "0123456789abcdef"})
+	if !stopped {
+		t.Fatal("text-only max_tokens must terminate the stream immediately")
+	}
+	if !strings.Contains(w.Body.String(), "message_stop") {
+		t.Fatal("Finish must have been called on immediate stop")
+	}
+}
+
+func TestSSEWriter_MaxTokensWithToolUse_NoDrainStopsImmediately(t *testing.T) {
+	// Claude models never emit a trailing reasoning blob: a completed tool
+	// call must not keep the stream draining when drainOnStop is unset.
+	w := httptest.NewRecorder()
+	sw := NewSSEWriter(context.Background(), w, "claude-sonnet-4.6", 200000, nil, 1, 0)
+
+	stopped := sw.HandleEvent(kiroproto.Event{Type: "toolUseEvent", ToolStop: true, ToolUseID: "toolu_1", ToolName: "read", ToolInput: `{"path":"/tmp/somewhere"}`})
+	if !stopped {
+		t.Fatal("max_tokens with tool use must terminate immediately without drainOnStop")
+	}
+	if !strings.Contains(w.Body.String(), "message_stop") {
+		t.Fatal("Finish must have been called on immediate stop")
+	}
+}
+
+func TestSSEWriter_MaxTokensRedactedOnly_StopsImmediately(t *testing.T) {
+	w := httptest.NewRecorder()
+	sw := NewSSEWriter(context.Background(), w, "gpt-5.6-sol", 272000, nil, 2, 0)
+
+	stopped := sw.HandleEvent(kiroproto.Event{
+		Type:            kiroproto.EventReasoningContent,
+		RedactedContent: strings.Repeat("A", 8),
+	})
+
+	if !stopped {
+		t.Fatal("redacted-only max_tokens must terminate the stream immediately")
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `"redacted_thinking"`) {
+		t.Fatalf("missing redacted_thinking block: %s", body)
+	}
+	if !strings.Contains(body, `"stop_reason":"max_tokens"`) {
+		t.Fatalf("missing max_tokens stop reason: %s", body)
+	}
+	if !strings.Contains(body, "message_stop") {
+		t.Fatalf("missing message_stop: %s", body)
 	}
 }

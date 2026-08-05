@@ -15,6 +15,7 @@ import (
 	"github.com/d-kuro/kirocc/internal/kiroclient"
 	"github.com/d-kuro/kirocc/internal/kiroproto"
 	"github.com/d-kuro/kirocc/internal/logging"
+	"github.com/d-kuro/kirocc/internal/models"
 	"github.com/d-kuro/kirocc/internal/respconv"
 )
 
@@ -28,30 +29,37 @@ func roundCredits(c float64) float64 {
 
 const retryReasonEmptyVisibleEndTurn = "empty_visible_end_turn"
 
-func (s *Service) handleStreamingResponse(ctx context.Context, w http.ResponseWriter, apiResp *kiroclient.Response, model string, contextWindowSize int, stopSequences []string, maxTokens int, preCountedInputTokens int, capture *upstreamAttemptCapture, toolNameMap map[string]string) string {
+func (s *Service) handleStreamingResponse(ctx context.Context, session *streamSession, apiResp *kiroclient.Response, kiroModel, model string, contextWindowSize int, stopSequences []string, maxTokens int, preCountedInputTokens int, capture *upstreamAttemptCapture, toolNameMap map[string]string) string {
 	traceID, short := logging.TraceIDs(ctx)
 
-	gw := NewGateWriter(w)
-	sw := respconv.NewSSEWriter(ctx, gw, model, contextWindowSize, stopSequences, maxTokens, preCountedInputTokens)
-	sw.OnVisibleOutput = func() { gw.Promote() }
+	sw := respconv.NewSSEWriter(ctx, session, model, contextWindowSize, stopSequences, maxTokens, preCountedInputTokens)
+	sw.OnVisibleOutput = session.Promote
 	sw.SetToolNameMap(toolNameMap)
+	// GPT 5.6 delivers a trailing redacted reasoning blob after tool_use, so
+	// the stream must keep draining past an adapter-side stop to capture it.
+	sw.SetDrainOnStop(models.IsReasoningModel(kiroModel))
+	// The kiro client has already confirmed HTTP 200 + event-stream at this
+	// point, and NewSSEWriter has installed downstream SSE headers.
+	session.Start()
 
 	var streamErr bool
 	var localStop bool
 	var invalidReason string
 	var isException bool
+	var upstreamMessage string
 	err := kiroproto.ParseStream(ctx, apiResp.Body, func(e kiroproto.Event) bool {
 		capture.recordEvent(e)
 		if streamErr || localStop {
 			return true
 		}
 		// Stop early if the client disconnected (write failed).
-		if sw.WriteErr() {
+		if sw.WriteErr() != nil || session.Err() != nil {
 			streamErr = true
 			return true
 		}
 		if e.Type == kiroproto.EventInvalidState {
 			invalidReason = e.InvalidStateReason
+			upstreamMessage = e.ErrorText()
 			slog.ErrorContext(ctx, "invalid state",
 				"trace_id", short,
 				"reason", e.InvalidStateReason,
@@ -60,6 +68,7 @@ func (s *Service) handleStreamingResponse(ctx context.Context, w http.ResponseWr
 		}
 		if e.Type == kiroproto.EventException {
 			isException = true
+			upstreamMessage = e.ErrorText()
 			slog.ErrorContext(ctx, "upstream exception",
 				"trace_id", short,
 				"reason", e.InvalidStateReason,
@@ -67,12 +76,20 @@ func (s *Service) handleStreamingResponse(ctx context.Context, w http.ResponseWr
 			)
 		}
 		shouldStop := sw.HandleEvent(e)
-		if sw.WriteErr() {
+		if sw.WriteErr() != nil || session.Err() != nil {
 			streamErr = true
 			return true
 		}
 		if !shouldStop {
 			return false
+		}
+		// Upstream error frames terminate as errors even when a local stop is
+		// already latched (e.g. an exception arriving mid-drain after a GPT
+		// tool-use max_tokens stop) — otherwise the truncated stream would be
+		// reported as a normal local stop without Finish or an error SSE.
+		if e.Type == kiroproto.EventInvalidState || e.Type == kiroproto.EventException {
+			streamErr = true
+			return true
 		}
 		// Distinguish adapter-side stop (Finish already called) from error.
 		// Closing the upstream body immediately on localStop avoids paying
@@ -85,32 +102,46 @@ func (s *Service) handleStreamingResponse(ctx context.Context, w http.ResponseWr
 		return true
 	})
 
-	if streamErr && !sw.Started() {
-		return handleUpstreamError(w, isException, invalidReason)
+	if sw.WriteErr() != nil || session.Err() != nil || ctx.Err() != nil {
+		return ""
 	}
 
-	// If the stream started (thinking events) but GateWriter was never promoted
-	// (no visible output reached the client), we can still discard and write error JSON.
-	if streamErr && sw.Started() && !gw.IsPromoted() {
-		gw.Discard()
-		return handleUpstreamError(w, isException, invalidReason)
+	if streamErr {
+		classification := classifyUpstreamError(isException, invalidReason, upstreamMessage)
+		if classification.retryReason != "" && !session.IsPromoted() {
+			session.Discard()
+			return classification.retryReason
+		}
+		_ = session.WriteFinalError(classification.final, func() error {
+			return sw.WriteError(classification.final.sseType, classification.final.sseMessage)
+		})
+		return ""
 	}
 
 	if err != nil {
 		slog.ErrorContext(ctx, "stream error", "trace_id", short, "err", err)
-		writeStreamingOrJSONError(gw, sw, w, http.StatusBadGateway, errTypeStreamError, "upstream stream error")
+		if ctx.Err() == nil && session.Err() == nil {
+			final := newStreamFinalError(http.StatusBadGateway, errTypeStreamError, "upstream stream error")
+			_ = session.WriteFinalError(final, func() error {
+				return sw.WriteError(errTypeStreamError, "upstream stream error")
+			})
+		}
 		return ""
 	}
 
 	if !streamErr && !localStop {
-		sw.Finish()
+		if err := sw.Finish(); err != nil {
+			return ""
+		}
 	}
 
-	// Detect a response the user would see as empty (thinking-only, or a bare
-	// synthetic-placeholder echo). If the GateWriter hasn't been promoted yet,
-	// we can safely discard and retry.
-	if !streamErr && !localStop && sw.IsEmptyVisibleEndTurn() && !gw.IsPromoted() {
-		gw.Discard()
+	// Detect a response the user would see as empty (reasoning-only, or a bare
+	// synthetic-placeholder echo). If the session hasn't been promoted yet, we
+	// can safely discard and retry. Retry eligibility hangs on semantic
+	// promotion, not HTTP commitment: a previously sent keep-alive is harmless
+	// to the second attempt.
+	if !streamErr && !localStop && sw.IsEmptyVisibleEndTurn() && !session.IsPromoted() {
+		session.Discard()
 		args := []any{
 			"trace_id", short,
 			"cause", sw.EmptyVisibleCause(),
@@ -124,13 +155,18 @@ func (s *Service) handleStreamingResponse(ctx context.Context, w http.ResponseWr
 		}
 		return retryReasonEmptyVisibleEndTurn
 	}
+	if !session.IsPromoted() {
+		if err := session.Promote(); err != nil {
+			return ""
+		}
+	}
 
 	// Log response completion (only on success).
 	if !streamErr {
 		slog.DebugContext(ctx, "client response headers",
 			"trace_id", traceID,
 			"session_id", logging.SessionIDFromContext(ctx),
-			"headers", logging.SafeHeaders{H: gw.Header()},
+			"headers", logging.SafeHeaders{H: session.Header()},
 		)
 		inputTokens, outputTokens := sw.Usage()
 		credits, hasCredits := sw.Credits()
@@ -147,11 +183,13 @@ func (s *Service) handleNonStreamingResponse(ctx context.Context, w http.Respons
 	var invalidReason string
 	var hasError bool
 	var isException bool
+	var upstreamMessage string
 	err := kiroproto.ParseStream(ctx, apiResp.Body, func(e kiroproto.Event) bool {
 		capture.recordEvent(e)
 		d := acc.ProcessEvent(e)
 		if d.IsError {
 			hasError = true
+			upstreamMessage = e.ErrorText()
 			switch e.Type {
 			case kiroproto.EventException:
 				isException = true
@@ -179,7 +217,12 @@ func (s *Service) handleNonStreamingResponse(ctx context.Context, w http.Respons
 	}
 
 	if hasError {
-		return handleUpstreamError(w, isException, invalidReason)
+		classification := classifyUpstreamError(isException, invalidReason, upstreamMessage)
+		if classification.retryReason != "" {
+			return classification.retryReason
+		}
+		httpx.WriteError(w, classification.final.status, classification.final.jsonType, classification.final.jsonMessage)
+		return ""
 	}
 
 	resp, stats := acc.BuildResponse(model)

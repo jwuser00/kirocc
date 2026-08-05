@@ -19,7 +19,7 @@ func TestSSEWriter_SyntheticEmptyEcho_IsEmptyVisible(t *testing.T) {
 			w := httptest.NewRecorder()
 			sw := NewSSEWriter(context.Background(), w, "claude-opus-5", 200000, nil, 0, 0)
 			var promoted bool
-			sw.OnVisibleOutput = func() { promoted = true }
+			sw.OnVisibleOutput = func() error { promoted = true; return nil }
 
 			sw.HandleEvent(kiroproto.Event{Type: "assistantResponseEvent", Content: echo})
 			sw.Finish()
@@ -41,7 +41,7 @@ func TestSSEWriter_PlaceholderWithContent_IsNotEmptyVisible(t *testing.T) {
 	w := httptest.NewRecorder()
 	sw := NewSSEWriter(context.Background(), w, "claude-opus-5", 200000, nil, 0, 0)
 	var promoted bool
-	sw.OnVisibleOutput = func() { promoted = true }
+	sw.OnVisibleOutput = func() error { promoted = true; return nil }
 
 	sw.HandleEvent(kiroproto.Event{
 		Type:    "assistantResponseEvent",
@@ -67,7 +67,7 @@ func TestSSEWriter_PlaceholderPrefixThenDiverges_ReleasesFullText(t *testing.T) 
 	w := httptest.NewRecorder()
 	sw := NewSSEWriter(context.Background(), w, "claude-opus-5", 200000, nil, 0, 0)
 	var promoted bool
-	sw.OnVisibleOutput = func() { promoted = true }
+	sw.OnVisibleOutput = func() error { promoted = true; return nil }
 
 	// Cumulative content, as Kiro sends it.
 	sw.HandleEvent(kiroproto.Event{Type: "assistantResponseEvent", Content: "(emp"})

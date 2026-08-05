@@ -161,10 +161,10 @@ func TestBuildSystemAndTools_DisabledDropsWebSearchEntirely(t *testing.T) {
 	}
 }
 
-func TestEnsureObjectSchema_FillsMissingSchema(t *testing.T) {
+func TestEnsureObjectRoot_FillsMissingSchema(t *testing.T) {
 	// A tool with no input_schema reaches Kiro as {} and takes the whole
 	// request down with it; the guard turns it into a valid empty object.
-	got := ensureObjectSchema(SanitizeJSONSchema(nil))
+	got := EnsureObjectRoot(SanitizeJSONSchema(nil))
 	if got["type"] != "object" {
 		t.Errorf("type = %v, want object", got["type"])
 	}
@@ -173,13 +173,13 @@ func TestEnsureObjectSchema_FillsMissingSchema(t *testing.T) {
 	}
 }
 
-func TestEnsureObjectSchema_PreservesExisting(t *testing.T) {
+func TestEnsureObjectRoot_PreservesExisting(t *testing.T) {
 	in := map[string]any{
 		"type":       "object",
 		"properties": map[string]any{"q": map[string]any{"type": "string"}},
 		"required":   []any{"q"},
 	}
-	got := ensureObjectSchema(in)
+	got := EnsureObjectRoot(in)
 	props, _ := got["properties"].(map[string]any)
 	if _, ok := props["q"]; !ok {
 		t.Errorf("existing properties lost: %v", got)

@@ -58,6 +58,9 @@ type responseAccumulator struct {
 	Credits    float64
 	// Signature from reasoningContentEvent.
 	Signature string
+	// Redacted reasoning blobs from reasoningContentEvent (GPT 5.6). Kept as
+	// separate blocks; base64 blobs must never be concatenated.
+	RedactedContents []string
 	// Conversation metadata.
 	ConversationID string
 	// Text presence.
@@ -119,12 +122,13 @@ func newAccumulator(contextWindowSize int, stopSequences []string, maxTokens int
 // IsEmptyVisibleEndTurn reports whether the response completed with nothing the
 // user would see: no visible text and no tool use.
 //
-// Two shapes qualify. The first is a thinking-only response, where the upstream
-// model produced a thinking block and stopped. The second is a response whose
-// only text is the synthetic placeholder kirocc injects into history to satisfy
-// Kiro's role alternation — the model reads that placeholder as an example of an
-// assistant turn and echoes it back, which reaches the user as a turn that says
-// nothing. Either way the caller discards and retries.
+// Two shapes qualify. The first is a reasoning-only response, where the upstream
+// model produced thinking text or redacted reasoning blobs and stopped. The
+// second is a response whose only text is the synthetic placeholder kirocc
+// injects into history to satisfy Kiro's role alternation — the model reads that
+// placeholder as an example of an assistant turn and echoes it back, which
+// reaches the user as a turn that says nothing. Either way the caller discards
+// and retries.
 func (a *responseAccumulator) IsEmptyVisibleEndTurn() bool {
 	if a.LocalStop {
 		return false // stop_sequence/max_tokens are not empty-response cases
@@ -133,15 +137,15 @@ func (a *responseAccumulator) IsEmptyVisibleEndTurn() bool {
 		return false // a tool call is visible output, and retrying would drop it
 	}
 	if a.TextBuf.Len() == 0 {
-		return a.ThinkingBuf.Len() > 0
+		return a.ThinkingBuf.Len() > 0 || len(a.RedactedContents) > 0
 	}
 	return anthropic.IsSyntheticEmptyEcho(a.TextBuf.String())
 }
 
 // Causes reported by EmptyVisibleCause.
 const (
-	// EmptyVisibleThinkingOnly is a response that produced a thinking block and
-	// then stopped without saying anything.
+	// EmptyVisibleThinkingOnly is a response that produced reasoning content —
+	// thinking text or redacted blobs — and then stopped without saying anything.
 	EmptyVisibleThinkingOnly = "thinking_only"
 	// EmptyVisibleSyntheticEcho is a response whose entire text is the synthetic
 	// placeholder kirocc injects into history, echoed back by the model.

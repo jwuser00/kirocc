@@ -22,21 +22,32 @@ type SSEWriter struct {
 	blockIndex int
 	activeType string // "thinking", "text", "tool_use", or ""
 	started    bool
-	writeErr   bool // true if a write/flush to the client failed
+	writeErr   error
 	acc        responseAccumulator
 
+	// drainOnStop keeps the stream draining after an adapter-side stop when a
+	// completed tool call exists, so a trailing reasoningContentEvent blob
+	// (GPT 5.6) can still be captured. Set by the caller for models that emit
+	// trailing reasoning; Claude models finish immediately to avoid paying for
+	// tokens the client will never receive.
+	drainOnStop bool
+
 	// OnVisibleOutput is called once, just before the first visible output
-	// (text delta or tool_use) is written. Used by GateWriter to promote
+	// (text delta or tool_use) is written. Used by the stream session to promote
 	// the buffered writer to direct mode.
-	OnVisibleOutput func()
+	OnVisibleOutput func() error
 	visibleFired    bool
 }
 
 // NewSSEWriter creates a new SSEWriter and sets response headers.
 func NewSSEWriter(ctx context.Context, w http.ResponseWriter, model string, contextWindowSize int, stopSequences []string, maxTokens int, preCountedInputTokens int) *SSEWriter {
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
+	if setter, ok := w.(interface{ SetSSEHeaders() }); ok {
+		setter.SetSSEHeaders()
+	} else {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+	}
 
 	f, _ := w.(http.Flusher)
 	sw := &SSEWriter{
@@ -61,8 +72,8 @@ func (s *SSEWriter) LocalStop() bool {
 	return s.acc.LocalStop
 }
 
-// WriteErr reports whether a write to the client failed (client likely disconnected).
-func (s *SSEWriter) WriteErr() bool {
+// WriteErr returns the first downstream write, promotion, or flush error.
+func (s *SSEWriter) WriteErr() error {
 	return s.writeErr
 }
 
@@ -85,8 +96,7 @@ func (s *SSEWriter) HandleEvent(e kiroproto.Event) bool {
 			s.writeDelta("text_delta", "text", d.TextDelta)
 		}
 		if d.StopSignal {
-			s.Finish()
-			return true
+			return s.stopOrDrain()
 		}
 
 	case kiroproto.EventReasoningContent:
@@ -104,6 +114,9 @@ func (s *SSEWriter) HandleEvent(e kiroproto.Event) bool {
 				},
 			})
 			s.closeActiveBlock()
+			if d.StopSignal {
+				return s.stopOrDrain()
+			}
 			return false
 		}
 		if d.ThinkingDelta == "" {
@@ -111,16 +124,14 @@ func (s *SSEWriter) HandleEvent(e kiroproto.Event) bool {
 		}
 		s.writeThinkingDelta(d)
 		if d.StopSignal {
-			s.Finish()
-			return true
+			return s.stopOrDrain()
 		}
 
 	case kiroproto.EventToolUse:
 		if d.ThinkingDelta != "" {
 			s.writeThinkingDelta(d)
 			if d.StopSignal {
-				s.Finish()
-				return true
+				return s.stopOrDrain()
 			}
 			return false
 		}
@@ -151,35 +162,30 @@ func (s *SSEWriter) HandleEvent(e kiroproto.Event) bool {
 			},
 		})
 		if d.StopSignal {
-			s.Finish()
-			return true
+			return s.stopOrDrain()
 		}
 
 	case kiroproto.EventInvalidState, kiroproto.EventException:
-		if !s.started {
-			return true
-		}
-		errType := "invalid_state"
-		if e.Type == kiroproto.EventException {
-			errType = "api_error"
-		}
-		s.WriteError(errType, d.ErrorMessage)
+		// Error classification and JSON-vs-SSE output belong to the request-scoped
+		// stream session, which knows whether HTTP is committed and whether
+		// semantic output has been promoted.
 		return true
 	}
 	return false
 }
 
 // WriteError writes an error SSE event to the stream.
-func (s *SSEWriter) WriteError(errType, message string) {
+func (s *SSEWriter) WriteError(errType, message string) error {
 	s.closeActiveBlock()
 	s.writeSSE("error", map[string]any{
 		"type":  "error",
 		"error": map[string]any{"type": errType, "message": message},
 	})
+	return s.writeErr
 }
 
 // Finish writes the closing SSE events (message_delta + message_stop).
-func (s *SSEWriter) Finish() {
+func (s *SSEWriter) Finish() error {
 	s.ensureStarted()
 
 	textDelta, thinkingDelta, res := finalizeResult(&s.acc)
@@ -209,6 +215,7 @@ func (s *SSEWriter) Finish() {
 	s.writeSSE("message_stop", map[string]any{
 		"type": "message_stop",
 	})
+	return s.writeErr
 }
 
 func (s *SSEWriter) ensureStarted() {
@@ -313,15 +320,47 @@ func (s *SSEWriter) HasContextUsage() bool { return s.acc.HasContextUsage }
 // The bool is false if no meteringEvent was received.
 func (s *SSEWriter) Credits() (float64, bool) { return s.acc.Credits, s.acc.HasCredits }
 
-// RecordTail forwards trailing metadata events (meteringEvent, contextUsageEvent)
-// to the inner accumulator without writing anything to the SSE stream. Used by
-// the tool-search orchestrator to keep collecting credit/context usage after the
-// upstream tool-use frame is detected, so cumulative stats remain accurate.
+// RecordTail forwards trailing metadata events (meteringEvent, contextUsageEvent,
+// reasoningContentEvent) to the inner accumulator without writing anything to
+// the SSE stream. Used by the tool-search orchestrator to keep collecting
+// credit/context usage and trailing redacted reasoning blobs after the upstream
+// tool-use frame is detected, so cumulative stats stay accurate and the blob
+// can be replayed into the next round's history.
 func (s *SSEWriter) RecordTail(e kiroproto.Event) {
 	switch e.Type {
 	case kiroproto.EventMetering, kiroproto.EventContextUsage:
 		s.acc.ProcessEvent(e)
+	case kiroproto.EventReasoningContent:
+		if e.RedactedContent != "" {
+			s.acc.ProcessEvent(e)
+		}
 	}
+}
+
+// RedactedContents returns the redacted reasoning blobs accumulated this round.
+func (s *SSEWriter) RedactedContents() []string {
+	return s.acc.RedactedContents
+}
+
+// SetDrainOnStop marks the stream as draining after an adapter-side stop when
+// a completed tool call exists. Set for models that emit a trailing
+// reasoningContentEvent blob after tool_use (GPT 5.6).
+func (s *SSEWriter) SetDrainOnStop(drain bool) {
+	s.drainOnStop = drain
+}
+
+// stopOrDrain handles an adapter-side stop signal (stop_sequence / max_tokens).
+// When drainOnStop is set and a completed tool call exists, the model may still
+// deliver a trailing reasoningContentEvent blob the client needs for
+// continuation, so the stream keeps draining; the caller's parse loop reaches
+// upstream EOF and calls Finish. Otherwise the stream finishes immediately to
+// avoid paying for tokens the client will never receive.
+func (s *SSEWriter) stopOrDrain() bool {
+	if s.drainOnStop && s.acc.HasToolUse {
+		return false
+	}
+	_ = s.Finish()
+	return true
 }
 
 // writeThinkingDelta writes a thinking_delta SSE event using direct formatting.
@@ -347,7 +386,9 @@ func (s *SSEWriter) fireVisibleOutput() {
 	}
 	s.visibleFired = true
 	if s.OnVisibleOutput != nil {
-		s.OnVisibleOutput()
+		if err := s.OnVisibleOutput(); err != nil && s.writeErr == nil {
+			s.writeErr = err
+		}
 	}
 }
 
@@ -403,7 +444,7 @@ func (s *SSEWriter) ResetAccumulator(contextWindowSize int, stopSequences []stri
 }
 
 func (s *SSEWriter) writeSSE(eventType string, data map[string]any) {
-	if s.writeErr {
+	if s.writeErr != nil {
 		return
 	}
 	b, err := json.Marshal(data)
@@ -413,26 +454,37 @@ func (s *SSEWriter) writeSSE(eventType string, data map[string]any) {
 	}
 	_, err = fmt.Fprintf(s.w, "event: %s\ndata: %s\n\n", eventType, b)
 	if err != nil {
-		s.writeErr = true
+		s.writeErr = err
 		return
 	}
 	if s.flusher != nil {
 		s.flusher.Flush()
 	}
+	s.captureWriterError()
 }
 
 // writeRawSSE writes a pre-formatted SSE event using fmt.Fprintf, avoiding map allocation and json.Marshal.
 func (s *SSEWriter) writeRawSSE(eventType, format string, args ...any) {
-	if s.writeErr {
+	if s.writeErr != nil {
 		return
 	}
 	_, err := fmt.Fprintf(s.w, "event: "+eventType+"\ndata: "+format+"\n\n", args...)
 	if err != nil {
-		s.writeErr = true
+		s.writeErr = err
 		return
 	}
 	if s.flusher != nil {
 		s.flusher.Flush()
+	}
+	s.captureWriterError()
+}
+
+func (s *SSEWriter) captureWriterError() {
+	if s.writeErr != nil {
+		return
+	}
+	if reporter, ok := s.w.(interface{ Err() error }); ok {
+		s.writeErr = reporter.Err()
 	}
 }
 

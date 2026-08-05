@@ -10,6 +10,7 @@ Just set `ANTHROPIC_BASE_URL` from any Anthropic API client (e.g., Claude Code) 
 - **Request conversion** — Automatically converts Anthropic API requests to Kiro API (AWS Event Stream) format
 - **Response conversion** — Converts Kiro event streams back to Anthropic SSE format
 - **Automatic auth management** — Reads credentials from Kiro CLI's SQLite DB with automatic token refresh (Social / OIDC)
+- **Kiro API key authentication** — Alternatively authenticate with a `KIRO_API_KEY` (`ksk_…`) for headless environments (CI, containers) where an interactive Kiro login is not available
 - **Model mapping** — Maps Anthropic model names (e.g., `claude-sonnet-4-6`) to Kiro model names. Customizable via environment variable
 - **Automatic model discovery** — Fetches Kiro's model catalog (`ListAvailableModels`) at startup, so models Kiro launches after a kirocc release resolve with the right context window and effort levels without a code change. Built-in mappings always win; discovery only fills gaps
 - **Custom API region** — Pin the region in `runtime.<region>.kiro.dev` with `-kiro-api-region`, for accounts whose stored credential region is not one Kiro serves
@@ -27,7 +28,9 @@ Just set `ANTHROPIC_BASE_URL` from any Anthropic API client (e.g., Claude Code) 
 ## Prerequisites
 
 - Go 1.26+
-- [Kiro CLI](https://kiro.dev) installed and logged in
+- One of the following:
+  - [Kiro CLI](https://kiro.dev) installed and logged in, **or**
+  - A Kiro API key (`KIRO_API_KEY`) — available for [Kiro Pro, Pro+, Pro Max, and Power](https://kiro.dev/docs/cli/authentication/) subscribers
 
 ## Installation
 
@@ -58,7 +61,7 @@ Listens on `http://127.0.0.1:3456` by default.
 ```bash
 export ANTHROPIC_BASE_URL=http://127.0.0.1:3456
 export ANTHROPIC_AUTH_TOKEN=dummy
-export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
+export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1   # optional: adds kirocc's models to the /model picker
 claude
 ```
 
@@ -67,7 +70,36 @@ claude
 `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` makes Claude Code 2.1.129+
 query kirocc's `GET /v1/models?limit=1000` endpoint at startup. Models returned
 by Kiro, including newly discovered Claude models, then appear in `/model` as
-`From gateway` entries.
+`From gateway` entries — including the GPT 5.6 models via their
+`claude-gpt-5.6-*` aliases (see [Model picker integration](#model-picker-integration-discovery-aliases)).
+
+### Use with a Kiro API key
+
+For headless environments (CI, containers, remote machines) where an interactive Kiro login is not available, you can authenticate with a [Kiro API key](https://kiro.dev/docs/cli/authentication/) instead:
+
+```bash
+export KIRO_API_KEY=ksk_...          # your Kiro API key
+kirocc                               # no Kiro CLI login or database needed
+```
+
+When `KIRO_API_KEY` is set:
+
+- The SQLite credential database is **never opened** — kirocc does not need Kiro CLI installed
+- No token refresh occurs — the key is presented directly to the Kiro API
+- A revoked key surfaces as a 401 from the API at request time
+- An empty or unset key falls back to the credential database as before
+
+Optionally set `KIRO_API_REGION` (default: `us-east-1`) if your Kiro account is in a different region.
+
+Then use with Claude Code as usual:
+
+```bash
+export ANTHROPIC_BASE_URL=http://127.0.0.1:3456
+export ANTHROPIC_AUTH_TOKEN=dummy
+claude
+```
+
+API keys are available for Kiro Pro, Pro+, Pro Max, and Power subscribers. On group subscriptions, an administrator must enable key generation in _Settings → Kiro settings → Enable users to generate API keys_. Create keys at [app.kiro.dev](https://app.kiro.dev) → API Keys.
 
 ### Run as a background service (macOS)
 
@@ -135,6 +167,7 @@ systemctl --user enable --now kirocc
 | `-host`                    | `127.0.0.1`               | Bind host                                                                 |
 | `-db`                      | (OS-dependent, see below) | Kiro CLI SQLite DB path                                                   |
 | `-api-key`                 | (none)                    | API key required to access the proxy                                      |
+| `-kiro-api-key`            | (none)                    | Kiro API key (`ksk_…`) for upstream authentication                        |
 | `-region`                  | (from credentials)        | Override the Kiro API region                                              |
 | `-kiro-api-region`         | (from credentials)        | Alias for `-region`                                                       |
 | `-base-url`                | (from region)             | Override the Kiro runtime endpoint entirely                               |
@@ -154,6 +187,7 @@ systemctl --user enable --now kirocc
 | `-log-console`             | `false`                   | Also write logs to console when `-log-file` is set                        |
 | `-otel`                    | `false`                   | Enable OpenTelemetry tracing (OTLP HTTP exporter)                         |
 | `-otel-body-limit`         | `32768`                   | Max bytes of request body to capture in OTel spans (0 = unlimited)        |
+| `-keepalive-interval`      | `15s`                     | SSE idle keep-alive interval (0 = disabled)                               |
 
 #### Images
 
@@ -239,6 +273,7 @@ Command-line options can be overridden with environment variables.
 | `KIROCC_HOST`                 | `-host`               |
 | `KIROCC_DB_PATH`              | `-db`                 |
 | `KIROCC_API_KEY`              | `-api-key`            |
+| `KIRO_API_KEY`                | `-kiro-api-key`       |
 | `KIROCC_REGION`               | `-region`             |
 | `KIRO_API_REGION`             | `-kiro-api-region`    |
 | `KIROCC_BASE_URL`             | `-base-url`           |
@@ -258,6 +293,7 @@ Command-line options can be overridden with environment variables.
 | `KIROCC_LOG_CONSOLE`          | `-log-console`        |
 | `KIROCC_OTEL`                 | `-otel`               |
 | `KIROCC_OTEL_BODY_LIMIT`      | `-otel-body-limit`    |
+| `KIROCC_KEEPALIVE_INTERVAL`   | `-keepalive-interval` |
 
 ### Automatic model discovery
 
@@ -405,6 +441,9 @@ Thinking is enabled by any of:
 
 Exception: the `[1m]` suffix on an **always-1M** model (`claude-opus-5[1m]` / `claude-opus-4-8[1m]` / `claude-opus-4-7[1m]` / `claude-opus-4-6[1m]` / `claude-sonnet-5[1m]`) is a first-class alias that only advertises the 1M context window — it does **not** enable thinking (see [Model mappings](#model-mappings)). Thinking on those models is still opt-in via the `context-1m` header or the `thinking` field.
 
+The suffix is matched case-insensitively because Claude Code may emit `[1M]`
+from internal call paths. Responses always use the canonical lowercase `[1m]`.
+
 The reasoning effort sent to the backend is resolved as follows:
 
 1. An explicit, recognized `output_config.effort` wins, validated/clamped to the model's allowed enum (`xhigh` on a 4-value model clamps to `max`; unrecognized strings are dropped).
@@ -419,6 +458,51 @@ Per-model allowed effort levels:
 - All other models omit `additionalModelRequestFields` entirely
 
 `thinking.budget_tokens` is accepted in the request but no longer affects behavior; reasoning depth is conveyed entirely through `effort`.
+
+#### GPT 5.6 models (reasoning schema)
+
+The GPT 5.6 family (`gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`) uses a different `additionalModelRequestFields` schema — `reasoning.effort` instead of `output_config.effort`:
+
+```json
+{
+  "conversationState": { "...": "..." },
+  "additionalModelRequestFields": {
+    "reasoning": { "effort": "high" }
+  }
+}
+```
+
+GPT-specific effort rules:
+
+- No `thinking` field and no explicit effort → the field is omitted entirely (the backend defaults to `high`, matching kiro-cli behavior)
+- `thinking.type: "enabled"` / `"adaptive"` → still omitted (= backend default `high`); no downgrade to `medium`
+- `thinking.type: "disabled"` → `reasoning.effort: "none"` (takes precedence over an explicit effort)
+- Explicit `output_config.effort` → validated against the GPT enum (`none`, `low`, `medium`, `high`, `xhigh`, `max`) and forwarded as `reasoning.effort`
+
+GPT reasoning streams as opaque `redacted_thinking` blocks (base64 blobs, no visible thinking text). The blob arrives **after** text/tool_use in the upstream stream and is surfaced to the client in that order. During tool-use continuations the client must send the `redacted_thinking` block back; kirocc replays it as `reasoningContent.redactedContent` in the request history only while that tool round is in flight.
+
+The `[1m]` suffix and `context-1m` header are not supported for GPT models (`gpt-5.6-sol[1m]` does not resolve). Context window is 272k input / 128k output; limits are enforced by the backend, not the proxy.
+
+#### Model picker integration (discovery aliases)
+
+Claude Code's [gateway model discovery](https://code.claude.com/docs/en/llm-gateway-protocol) fetches `GET /v1/models` and adds the results to the `/model` picker — but it silently drops any ID that doesn't start with `claude` or `anthropic`, so the bare `gpt-5.6-*` IDs never appear. kirocc therefore also advertises `claude-` prefixed discovery aliases:
+
+| Alias                  | Kiro model      | Picker label    |
+| ---------------------- | --------------- | --------------- |
+| `claude-gpt-5.6-sol`   | `gpt-5.6-sol`   | `GPT 5.6 Sol`   |
+| `claude-gpt-5.6-terra` | `gpt-5.6-terra` | `GPT 5.6 Terra` |
+| `claude-gpt-5.6-luna`  | `gpt-5.6-luna`  | `GPT 5.6 Luna`  |
+
+The aliases resolve identically to the canonical IDs (same 272k window, same reasoning schema). To surface them in the picker, launch Claude Code with:
+
+```bash
+export ANTHROPIC_BASE_URL=http://127.0.0.1:3456
+export ANTHROPIC_AUTH_TOKEN=dummy
+export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
+claude
+```
+
+The picker shows them under "From gateway" using the `display_name` values above. The canonical `gpt-5.6-*` IDs still work everywhere else (`--model gpt-5.6-sol`, `ANTHROPIC_MODEL`, direct API calls).
 
 ### Tool Search
 
@@ -471,16 +555,22 @@ Anthropic's WebSearch is a server tool: the search runs inside Anthropic's API, 
 | `claude-opus-4-6[1m]`   | `claude-opus-4.6`      | 1M             |
 | `claude-opus-4.5`       | `claude-opus-4.5`      | 200k           |
 | `claude-haiku-4.5`      | `claude-haiku-4.5`     | 200k           |
+| `gpt-5.6-sol`           | `gpt-5.6-sol`          | 272k           |
+| `gpt-5.6-terra`         | `gpt-5.6-terra`        | 272k           |
+| `gpt-5.6-luna`          | `gpt-5.6-luna`         | 272k           |
+| `claude-gpt-5.6-sol`    | `gpt-5.6-sol`          | 272k           |
+| `claude-gpt-5.6-terra`  | `gpt-5.6-terra`        | 272k           |
+| `claude-gpt-5.6-luna`   | `gpt-5.6-luna`         | 272k           |
 
-Opus 5, 4.6, 4.7, 4.8, and Sonnet 5 always use 1M context (no 200k SKU exists upstream). Unlike Sonnet 4.6, `claude-opus-5` and `claude-sonnet-5` have no separate `-1m` SKU: the single SKU is always 1M. The explicit `[1m]`-suffixed aliases (`claude-opus-5[1m]` / `claude-opus-4-8[1m]` / `claude-opus-4-7[1m]` / `claude-opus-4-6[1m]` / `claude-sonnet-5[1m]`) are first-class entries that preserve the suffix verbatim in the response `model` field — this matches Claude Code's default Max-plan state (`lG()` emits `claude-opus-4-8[1m]`) and keeps its `mR()` 1M-context check happy without spuriously enabling extended thinking. Thinking is still opt-in via Sonnet `[1m]` suffix, `Anthropic-Beta: context-1m` header, or `thinking` field.
+Opus 5, Opus 4.6, 4.7, 4.8, and Sonnet 5 always use 1M context (no 200k SKU exists upstream). Unlike Sonnet 4.6, `claude-opus-5` and `claude-sonnet-5` have no separate `-1m` SKU: each single SKU is always 1M. The explicit `[1m]`-suffixed aliases (`claude-opus-5[1m]` / `claude-opus-4-8[1m]` / `claude-opus-4-7[1m]` / `claude-opus-4-6[1m]` / `claude-sonnet-5[1m]`) are first-class entries that preserve the suffix verbatim in the response `model` field — this matches Claude Code's default Max-plan state (`lG()` emits `claude-opus-4-8[1m]`) and keeps its `mR()` 1M-context check happy without spuriously enabling extended thinking. On these always-1M models, thinking remains opt-in via the `context-1m` header or the `thinking` field; the `[1m]` suffix remains a thinking opt-in for models without a first-class always-1M alias.
 
-Unmatched `claude-*` models are passed through as-is. Non-claude models fall back to `claude-sonnet-4.6`.
+Unmatched `claude-*` models are passed through as-is. Non-claude models fall back to `claude-sonnet-4.6` (the `gpt-5.6-*` IDs and their `claude-gpt-5.6-*` discovery aliases above are explicit entries and do not fall back).
 
 #### Response model ID
 
 The `model` field in `/v1/messages` responses (streaming `message_start`, non-streaming body, and tool-search path) is returned as the **Anthropic-form ID** (e.g. `claude-opus-4-7`), not the Kiro SKU (`claude-opus-4.7`).
 
-When the proxy routes to a **1M context window** (always-1M SKU such as `claude-opus-4.8` / `claude-opus-4.7` / `claude-opus-4.6`, or a model invoked with the `[1m]` suffix or `Anthropic-Beta: context-1m` header), a trailing `[1m]` is appended to the response model ID (e.g. `claude-opus-4-8[1m]`). Claude Code's client-side context-window logic matches `/\[1m\]/i` on the response model to pick the 1M window — without the suffix it defaults to 200k and auto-compacts at ~160k even when upstream actually has 1M of context.
+When the proxy routes to a **1M context window** (always-1M SKU such as `claude-opus-5` / `claude-opus-4.8` / `claude-opus-4.7` / `claude-opus-4.6`, or a model invoked with the `[1m]` suffix or `Anthropic-Beta: context-1m` header), a trailing `[1m]` is appended to the response model ID (e.g. `claude-opus-5[1m]`). Claude Code's client-side context-window logic matches `/\[1m\]/i` on the response model to pick the 1M window — without the suffix it defaults to 200k and auto-compacts at ~160k even when upstream actually has 1M of context.
 
 Note: `[1m]` has different meanings on request vs. response. On the **request** `model` it is a client-supplied thinking-opt-in signal (and is stripped before upstream routing). On the **response** `model` it is purely a context-window advertisement for Claude Code and does not imply that extended thinking was enabled.
 

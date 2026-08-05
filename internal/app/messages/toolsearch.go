@@ -15,6 +15,7 @@ import (
 	"github.com/d-kuro/kirocc/internal/kiromcp"
 	"github.com/d-kuro/kirocc/internal/kiroproto"
 	"github.com/d-kuro/kirocc/internal/logging"
+	"github.com/d-kuro/kirocc/internal/models"
 	"github.com/d-kuro/kirocc/internal/reqconv"
 	"github.com/d-kuro/kirocc/internal/respconv"
 	"github.com/d-kuro/kirocc/internal/toolsearch"
@@ -182,19 +183,19 @@ type toolSearchOrchestrator struct {
 // run dispatches to the streaming or non-streaming implementation based on
 // req.Stream. Returns retryReasonEmptyVisibleEndTurn when the upstream produced
 // nothing the user would see and the call site should retry.
-func (o *toolSearchOrchestrator) run(ctx context.Context, w http.ResponseWriter) string {
+func (o *toolSearchOrchestrator) run(ctx context.Context, w http.ResponseWriter, session *streamSession) string {
 	if o.req.Stream {
-		return o.handleStreaming(ctx, w)
+		return o.handleStreaming(ctx, session)
 	}
 	return o.handleNonStreaming(ctx, w)
 }
 
-func (o *toolSearchOrchestrator) handleStreaming(ctx context.Context, w http.ResponseWriter) string {
+func (o *toolSearchOrchestrator) handleStreaming(ctx context.Context, session *streamSession) string {
 	_, short := logging.TraceIDs(ctx)
 
-	gw := NewGateWriter(w)
-	sw := respconv.NewSSEWriter(ctx, gw, o.responseModel, o.contextWindowSize, o.req.StopSequences, o.req.MaxTokens, 0)
-	sw.OnVisibleOutput = func() { gw.Promote() }
+	sw := respconv.NewSSEWriter(ctx, session, o.responseModel, o.contextWindowSize, o.req.StopSequences, o.req.MaxTokens, 0)
+	sw.OnVisibleOutput = session.Promote
+	sw.SetDrainOnStop(models.IsReasoningModel(o.buildOpts.ModelID))
 
 	msgs := slices.Clone(o.req.Messages)
 
@@ -205,7 +206,10 @@ func (o *toolSearchOrchestrator) handleStreaming(ctx context.Context, w http.Res
 		payload, nameMap, err := o.buildPayload(msgs)
 		if err != nil {
 			slog.WarnContext(ctx, "tool search payload build error", "trace_id", short, "err", err)
-			writeStreamingOrJSONError(gw, sw, w, http.StatusBadRequest, errTypeInvalidRequest, err.Error())
+			final := newStreamFinalError(http.StatusBadRequest, errTypeInvalidRequest, err.Error())
+			_ = session.WriteFinalError(final, func() error {
+				return sw.WriteError(errTypeInvalidRequest, err.Error())
+			})
 			return ""
 		}
 		sw.SetToolNameMap(nameMap.ReverseMap())
@@ -213,9 +217,13 @@ func (o *toolSearchOrchestrator) handleStreaming(ctx context.Context, w http.Res
 		apiResp, err := o.service.client.GenerateAssistantResponse(ctx, o.creds.AccessToken, payload, o.creds.Region)
 		if err != nil {
 			logUpstreamError(ctx, short, err, "round", round+1)
-			writeStreamingOrJSONError(gw, sw, w, http.StatusBadGateway, errTypeAPI, "upstream API error")
+			final := newStreamFinalError(http.StatusBadGateway, errTypeAPI, "upstream API error")
+			_ = session.WriteFinalError(final, func() error {
+				return sw.WriteError(errTypeAPI, "upstream API error")
+			})
 			return ""
 		}
+		session.Start()
 
 		if round > 0 {
 			// Accumulate usage from previous round before resetting.
@@ -228,6 +236,9 @@ func (o *toolSearchOrchestrator) handleStreaming(ctx context.Context, w http.Res
 
 		var caught []interception
 		var streamErr, localStop bool
+		var invalidReason string
+		var isException bool
+		var upstreamMessage string
 
 		err = kiroproto.ParseStream(ctx, apiResp.Body, func(e kiroproto.Event) bool {
 			if streamErr || localStop {
@@ -240,6 +251,9 @@ func (o *toolSearchOrchestrator) handleStreaming(ctx context.Context, w http.Res
 			// Upstream errors in the tail must still abort the round.
 			if len(caught) > 0 {
 				if e.Type == kiroproto.EventException || e.Type == kiroproto.EventInvalidState {
+					isException = e.Type == kiroproto.EventException
+					invalidReason = e.InvalidStateReason
+					upstreamMessage = e.ErrorText()
 					streamErr = true
 					return true
 				}
@@ -250,7 +264,7 @@ func (o *toolSearchOrchestrator) handleStreaming(ctx context.Context, w http.Res
 				sw.RecordTail(e)
 				return false
 			}
-			if sw.WriteErr() {
+			if sw.WriteErr() != nil || session.Err() != nil {
 				streamErr = true
 				return true
 			}
@@ -258,13 +272,25 @@ func (o *toolSearchOrchestrator) handleStreaming(ctx context.Context, w http.Res
 				caught = append(caught, interception{name: e.ToolName, input: e.ToolInput})
 				return false
 			}
+			if e.Type == kiroproto.EventException || e.Type == kiroproto.EventInvalidState {
+				isException = e.Type == kiroproto.EventException
+				invalidReason = e.InvalidStateReason
+				upstreamMessage = e.ErrorText()
+			}
 			shouldStop := sw.HandleEvent(e)
-			if sw.WriteErr() {
+			if sw.WriteErr() != nil || session.Err() != nil {
 				streamErr = true
 				return true
 			}
 			if !shouldStop {
 				return false
+			}
+			// Upstream error frames terminate as errors even when a local
+			// stop is already latched (e.g. an exception arriving mid-drain
+			// after a GPT tool-use max_tokens stop).
+			if e.Type == kiroproto.EventException || e.Type == kiroproto.EventInvalidState {
+				streamErr = true
+				return true
 			}
 			if sw.LocalStop() {
 				localStop = true
@@ -275,26 +301,35 @@ func (o *toolSearchOrchestrator) handleStreaming(ctx context.Context, w http.Res
 		})
 		_ = apiResp.Body.Close()
 
+		if sw.WriteErr() != nil || session.Err() != nil || ctx.Err() != nil {
+			return ""
+		}
+
 		// A parse error or upstream error frame in the tail must abort the
 		// orchestrator even when the tool-search frame was already observed.
-		if err != nil || streamErr {
-			if err != nil {
-				slog.ErrorContext(ctx, "stream error", "trace_id", short, "round", round+1, "err", err)
-			}
-			// If the stream is already promoted, sw.HandleEvent has already
-			// emitted an SSE error event for invalidStateEvent/exception;
-			// emitting another would produce duplicate/conflicting frames.
-			if sw.Started() && gw.IsPromoted() {
-				return ""
-			}
-			writeStreamingOrJSONError(gw, sw, w, http.StatusBadGateway, errTypeAPI, "upstream stream error")
+		if streamErr {
+			classification := classifyUpstreamError(isException, invalidReason, upstreamMessage)
+			_ = session.WriteFinalError(classification.final, func() error {
+				return sw.WriteError(classification.final.sseType, classification.final.sseMessage)
+			})
+			return ""
+		}
+		if err != nil {
+			slog.ErrorContext(ctx, "stream error", "trace_id", short, "round", round+1, "err", err)
+			final := newStreamFinalError(http.StatusBadGateway, errTypeStreamError, "upstream stream error")
+			_ = session.WriteFinalError(final, func() error {
+				return sw.WriteError(errTypeStreamError, "upstream stream error")
+			})
 			return ""
 		}
 
 		plan, planErr := o.planRound(caught, &budget)
 		if planErr != nil {
 			slog.WarnContext(ctx, "web search input parse error", "trace_id", short, "err", planErr)
-			writeStreamingOrJSONError(gw, sw, w, http.StatusBadRequest, errTypeInvalidRequest, planErr.Error())
+			final := newStreamFinalError(http.StatusBadRequest, errTypeInvalidRequest, planErr.Error())
+			_ = session.WriteFinalError(final, func() error {
+				return sw.WriteError(errTypeInvalidRequest, planErr.Error())
+			})
 			return ""
 		}
 		if plan == nil {
@@ -304,17 +339,24 @@ func (o *toolSearchOrchestrator) handleStreaming(ctx context.Context, w http.Res
 			}
 			// streamErr was already handled above; only success/localStop reach here.
 			if !localStop {
-				sw.Finish()
+				if err := sw.Finish(); err != nil {
+					return ""
+				}
 			}
 			// Detect a response the user would see as empty and signal retry.
-			if !localStop && sw.IsEmptyVisibleEndTurn() && !gw.IsPromoted() {
-				gw.Discard()
+			if !localStop && sw.IsEmptyVisibleEndTurn() && !session.IsPromoted() {
+				session.Discard()
 				slog.WarnContext(ctx, "empty visible end_turn detected in tool search",
 					"trace_id", short, "cause", sw.EmptyVisibleCause())
 				if credits, ok := totals.creditsWith(sw.Credits()); ok {
 					logAbortedAttemptCredits(ctx, short, credits, retryReasonEmptyVisibleEndTurn)
 				}
 				return retryReasonEmptyVisibleEndTurn
+			}
+			if !session.IsPromoted() {
+				if err := session.Promote(); err != nil {
+					return ""
+				}
 			}
 			in, out := sw.Usage()
 			credits, hasCredits := sw.Credits()
@@ -347,13 +389,22 @@ func (o *toolSearchOrchestrator) handleStreaming(ctx context.Context, w http.Res
 			}
 			msgs = appendWebSearchMessages(msgs, preamble, calls)
 		}
+		if sw.WriteErr() != nil || session.Err() != nil {
+			return ""
+		}
 
+		// The round's redacted reasoning blobs (GPT 5.6) belong to the round, not
+		// to each search, so only the first replayed assistant turn carries them.
+		redacted := sw.RedactedContents()
 		for _, ts := range plan.toolSearches {
 			// ToolSearch detected — execute search and emit SSE blocks.
 			query, maxResults, parseErr := parseToolSearchInput(ts.input)
 			if parseErr != nil {
 				slog.WarnContext(ctx, "tool search input parse error", "trace_id", short, "err", parseErr)
-				writeStreamingOrJSONError(gw, sw, w, http.StatusBadRequest, errTypeInvalidRequest, parseErr.Error())
+				final := newStreamFinalError(http.StatusBadRequest, errTypeInvalidRequest, parseErr.Error())
+				_ = session.WriteFinalError(final, func() error {
+					return sw.WriteError(errTypeInvalidRequest, parseErr.Error())
+				})
 				return ""
 			}
 			srvToolUseID := "srvtoolu_" + uuid.New().String()[:24]
@@ -368,14 +419,25 @@ func (o *toolSearchOrchestrator) handleStreaming(ctx context.Context, w http.Res
 			} else {
 				sw.WriteToolSearchResult(srvToolUseID, results)
 			}
+			if sw.WriteErr() != nil || session.Err() != nil {
+				return ""
+			}
 
-			msgs = o.appendSearchMessages(msgs, srvToolUseID, searchInput, results, searchErr, nameMap)
+			msgs = o.appendSearchMessages(msgs, srvToolUseID, searchInput, results, searchErr, nameMap, redacted)
+			redacted = nil
 		}
 	}
 
 	// Max rounds reached without normal completion.
 	slog.WarnContext(ctx, "tool search max rounds reached", "trace_id", short, "max_rounds", maxToolSearchRounds)
-	sw.Finish()
+	if err := sw.Finish(); err != nil {
+		return ""
+	}
+	if !session.IsPromoted() {
+		if err := session.Promote(); err != nil {
+			return ""
+		}
+	}
 	in, out := sw.Usage()
 	credits, hasCredits := sw.Credits()
 	totalIn, totalOut, totalCredits, totalHasCredits := totals.withCurrent(in, out, credits, hasCredits)
@@ -494,6 +556,10 @@ func (o *toolSearchOrchestrator) handleNonStreaming(ctx context.Context, w http.
 			msgs = appendWebSearchMessages(msgs, textOfContentBlocks(content), calls)
 		}
 
+		// The round's redacted reasoning blobs (GPT 5.6) belong to the round,
+		// not to each search, so only the first replayed assistant turn
+		// carries them.
+		redacted := acc.RedactedContents()
 		for _, ts := range plan.toolSearches {
 			// Execute search.
 			query, maxResults, parseErr := parseToolSearchInput(ts.input)
@@ -536,7 +602,8 @@ func (o *toolSearchOrchestrator) handleNonStreaming(ctx context.Context, w http.
 				})
 			}
 
-			msgs = o.appendSearchMessages(msgs, srvToolUseID, searchInput, results, searchErr, nameMap)
+			msgs = o.appendSearchMessages(msgs, srvToolUseID, searchInput, results, searchErr, nameMap, redacted)
+			redacted = nil
 		}
 	}
 
@@ -587,7 +654,10 @@ func (o *toolSearchOrchestrator) executeSearch(ctx context.Context, short string
 // appendSearchMessages appends the server_tool_use + tool_result messages to the conversation.
 // On error, the tool_result contains the error message instead of tool references.
 // Tool names in the result text are shortened via nameMap so Kiro sees consistent names.
-func (o *toolSearchOrchestrator) appendSearchMessages(msgs []anthropic.Message, srvToolUseID string, searchInput map[string]any, results []string, searchErr error, nameMap *reqconv.ToolNameMap) []anthropic.Message {
+// redacted carries the round's redacted reasoning blobs (GPT 5.6); they are
+// replayed as redacted_thinking blocks so buildHistory can attach the blob to
+// the in-flight tool round in the next request.
+func (o *toolSearchOrchestrator) appendSearchMessages(msgs []anthropic.Message, srvToolUseID string, searchInput map[string]any, results []string, searchErr error, nameMap *reqconv.ToolNameMap, redacted []string) []anthropic.Message {
 	var resultContent anthropic.MessageContent
 	var isError bool
 	if searchErr != nil {
@@ -601,12 +671,15 @@ func (o *toolSearchOrchestrator) appendSearchMessages(msgs []anthropic.Message, 
 		}
 		resultContent = anthropic.MessageContent{Text: "Found tools: " + strings.Join(shortened, ", ")}
 	}
+	assistantBlocks := make([]anthropic.ContentBlock, 0, len(redacted)+1)
+	for _, data := range redacted {
+		assistantBlocks = append(assistantBlocks, anthropic.ContentBlock{Type: anthropic.BlockTypeRedactedThinking, Data: data})
+	}
+	assistantBlocks = append(assistantBlocks, anthropic.ContentBlock{Type: anthropic.BlockTypeServerToolUse, ID: srvToolUseID, Name: toolsearch.KiroToolSearchName, Input: searchInput})
 	return append(msgs,
 		anthropic.Message{
-			Role: "assistant",
-			Content: anthropic.MessageContent{Blocks: []anthropic.ContentBlock{
-				{Type: anthropic.BlockTypeServerToolUse, ID: srvToolUseID, Name: toolsearch.KiroToolSearchName, Input: searchInput},
-			}},
+			Role:    "assistant",
+			Content: anthropic.MessageContent{Blocks: assistantBlocks},
 		},
 		anthropic.Message{
 			Role: "user",
@@ -647,18 +720,6 @@ func (o *toolSearchOrchestrator) buildPayload(msgs []anthropic.Message) (*kiropr
 	tmpReq := *o.req
 	tmpReq.Messages = msgs
 	return reqconv.BuildPayload(&tmpReq, o.buildOpts)
-}
-
-// writeStreamingOrJSONError writes an error via SSE if the stream is promoted, otherwise via JSON.
-func writeStreamingOrJSONError(gw *GateWriter, sw *respconv.SSEWriter, w http.ResponseWriter, status int, errType, message string) {
-	if sw.Started() && gw.IsPromoted() {
-		sw.WriteError(errType, message)
-		return
-	}
-	if !gw.IsPromoted() {
-		gw.Discard()
-	}
-	httpx.WriteError(w, status, errType, message)
 }
 
 // parseToolSearchInput extracts query and max_results from the ToolSearch tool input JSON.

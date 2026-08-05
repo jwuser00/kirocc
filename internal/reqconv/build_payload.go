@@ -4,6 +4,7 @@ import (
 	"github.com/d-kuro/kirocc/internal/anthropic"
 	"github.com/d-kuro/kirocc/internal/kiromcp"
 	"github.com/d-kuro/kirocc/internal/kiroproto"
+	"github.com/d-kuro/kirocc/internal/models"
 	"github.com/d-kuro/kirocc/internal/toolsearch"
 	"github.com/google/uuid"
 )
@@ -49,8 +50,17 @@ func BuildPayload(req *anthropic.Request, options BuildOptions) (*kiroproto.Payl
 	msgs := Normalize(req.Messages, hasTools)
 	historyMsgs, lastMsg := splitMessages(msgs)
 
+	// Single-pass scan of the current message for tool_results and images.
+	// The tool_result IDs also identify which trailing assistant tool round is
+	// still in flight (for redacted reasoning replay in history).
+	toolResults, images := scanCurrentMessage(lastMsg.Content)
+	currentToolResultIDs := make([]string, 0, len(toolResults))
+	for _, tr := range toolResults {
+		currentToolResultIDs = append(currentToolResultIDs, tr.ToolUseID)
+	}
+
 	// 3. Build history and place system prompt.
-	history := buildHistory(historyMsgs, nameMap)
+	history := buildHistory(historyMsgs, nameMap, currentToolResultIDs)
 	history, lastContent := placeSystemPrompt(systemPrompt, history, ExtractTextContent(lastMsg.Content))
 
 	// 4. Build currentMessage.
@@ -59,7 +69,7 @@ func BuildPayload(req *anthropic.Request, options BuildOptions) (*kiroproto.Payl
 	if len(historyMsgs) > 0 {
 		precedingToolUseIDs = extractToolUseIDs(historyMsgs[len(historyMsgs)-1])
 	}
-	userInputMessage := buildCurrentMessage(lastMsg, lastContent, options.ModelID, toolEntries, envState, precedingToolUseIDs,
+	userInputMessage := buildCurrentMessage(lastContent, options.ModelID, toolEntries, envState, toolResults, images, precedingToolUseIDs,
 		collectHistoryImages(historyMsgs, options.HistoryImageTurns))
 
 	convState := kiroproto.ConversationState{
@@ -76,9 +86,13 @@ func BuildPayload(req *anthropic.Request, options BuildOptions) (*kiroproto.Payl
 		payload.ProfileARN = options.ProfileARN
 	}
 	if options.Effort != "" {
-		payload.AdditionalModelRequestFields = &kiroproto.AdditionalModelRequestFields{
-			OutputConfig: &kiroproto.OutputConfig{Effort: options.Effort},
+		amrf := &kiroproto.AdditionalModelRequestFields{}
+		if models.IsReasoningModel(options.ModelID) {
+			amrf.Reasoning = &kiroproto.ReasoningConfig{Effort: options.Effort}
+		} else {
+			amrf.OutputConfig = &kiroproto.OutputConfig{Effort: options.Effort}
 		}
+		payload.AdditionalModelRequestFields = amrf
 	}
 	return payload, nameMap, nil
 }
@@ -165,18 +179,17 @@ func placeSystemPrompt(systemPrompt string, history []kiroproto.HistoryEntry, la
 }
 
 // buildCurrentMessage constructs the Kiro UserInputMessage from the last Anthropic message.
+// toolResults and images come from the caller's single scan of that message.
 // historyImages are images from earlier turns, replayed here because Kiro
 // history entries cannot carry them; they precede this turn's own images so the
 // ordering still runs oldest to newest.
-func buildCurrentMessage(lastMsg anthropic.Message, lastContent, modelID string, toolEntries []kiroproto.ToolEntry, envState *kiroproto.EnvState, precedingToolUseIDs []string, historyImages []kiroproto.Image) kiroproto.UserInputMessage {
+func buildCurrentMessage(lastContent, modelID string, toolEntries []kiroproto.ToolEntry, envState *kiroproto.EnvState, toolResults []kiroproto.ToolResult, images []kiroproto.Image, precedingToolUseIDs []string, historyImages []kiroproto.Image) kiroproto.UserInputMessage {
 	msg := kiroproto.UserInputMessage{
 		Content: lastContent,
 		ModelID: modelID,
 		Origin:  kiroproto.OriginKiroCLI,
 	}
 
-	// Single-pass scan of lastMsg.Content to extract both tool_results and images.
-	toolResults, images := scanCurrentMessage(lastMsg.Content)
 	toolResults = ReorderToolResults(toolResults, precedingToolUseIDs)
 	if envState != nil || len(toolEntries) > 0 || len(toolResults) > 0 {
 		// Field order matches the wire format: envState before tools.

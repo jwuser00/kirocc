@@ -2,6 +2,7 @@ package server
 
 import (
 	"net/http"
+	"time"
 
 	messagesapp "github.com/d-kuro/kirocc/internal/app/messages"
 	"github.com/d-kuro/kirocc/internal/kiroclient"
@@ -60,6 +61,12 @@ func WithWebSearchVisible(v bool) ServerOption {
 	return func(s *Server) { s.webSearchVisible = v }
 }
 
+// WithKeepAliveInterval sets the idle interval for streaming SSE comments.
+// A zero duration disables keep-alive comments.
+func WithKeepAliveInterval(interval time.Duration) ServerOption {
+	return func(s *Server) { s.keepAliveInterval = interval }
+}
+
 // Server is the HTTP server for the kirocc proxy.
 type Server struct {
 	apiKey            string
@@ -73,6 +80,7 @@ type Server struct {
 	webFetchCount     int
 	webFetchBytes     int
 	webSearchVisible  bool
+	keepAliveInterval time.Duration
 	mux               *http.ServeMux
 	messages          *messagesapp.Service
 }
@@ -96,6 +104,7 @@ func New(authMgr messagesapp.TokenGetter, apiKey string, client kiroclient.Clien
 		messagesapp.WithMCPClient(s.mcp),
 		messagesapp.WithWebFetch(s.webFetcher, s.webFetchCount, s.webFetchBytes),
 		messagesapp.WithWebSearchVisible(s.webSearchVisible),
+		messagesapp.WithKeepAliveInterval(s.keepAliveInterval),
 	)
 	s.registerRoutes()
 	return s

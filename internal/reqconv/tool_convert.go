@@ -22,30 +22,12 @@ func ConvertTools(tools []anthropic.Tool, nameMap *ToolNameMap) []kiroproto.Tool
 			ToolSpecification: &kiroproto.ToolSpecification{
 				Name:        name,
 				Description: desc,
-				InputSchema: kiroproto.InputSchema{JSON: ensureObjectSchema(SanitizeJSONSchema(t.InputSchema))},
+				InputSchema: kiroproto.InputSchema{JSON: EnsureObjectRoot(SanitizeJSONSchema(t.InputSchema))},
 			},
 		})
 	}
 
 	return entries
-}
-
-// ensureObjectSchema guarantees the schema Kiro receives is a usable object
-// schema. SanitizeJSONSchema turns a missing input_schema into an empty map,
-// and Kiro rejects the whole request — not just the offending tool — when a
-// toolSpecification carries one. Anthropic's server tools are the common
-// source, but any client that omits input_schema hits the same wall.
-func ensureObjectSchema(schema map[string]any) map[string]any {
-	if schema == nil {
-		schema = map[string]any{}
-	}
-	if _, ok := schema["type"]; !ok {
-		schema["type"] = "object"
-	}
-	if _, ok := schema["properties"]; !ok {
-		schema["properties"] = map[string]any{}
-	}
-	return schema
 }
 
 const thinkingToolDescription = "Thinking is an internal reasoning mechanism improving the quality of complex tasks by breaking their atomic actions down; use it specifically for multi-step problems requiring step-by-step dependencies, reasoning through multiple constraints, synthesizing results from previous tool calls, planning intricate sequences of actions, troubleshooting complex errors, or making decisions involving multiple trade-offs. Avoid using it for straightforward tasks, basic information retrieval, summaries, always clearly define the reasoning challenge, structure thoughts explicitly, consider multiple perspectives, and summarize key insights before important decisions or complex tool interactions."

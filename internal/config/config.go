@@ -8,21 +8,32 @@ import (
 	"regexp"
 	"runtime"
 	"strconv"
+	"time"
 
 	"github.com/d-kuro/kirocc/internal/logging"
 )
 
-// DefaultOTelBodyLimit is the default max bytes of request body to capture in OTel spans.
-const DefaultOTelBodyLimit = 32 * 1024
+const (
+	// DefaultOTelBodyLimit is the default max bytes of request body to capture in OTel spans.
+	DefaultOTelBodyLimit = 32 * 1024
+	// DefaultKeepAliveInterval is the default idle time between SSE keep-alive comments.
+	DefaultKeepAliveInterval = 15 * time.Second
+)
 
 // Config is the runtime configuration for kirocc.
 type Config struct {
 	Port   int
 	Host   string
 	DBPath string
-	APIKey string
-	// Region pins the region used by Kiro runtime and model catalog endpoints.
-	// Empty means "use the region resolved from the credential store".
+	APIKey string // guards kirocc's own endpoints; unrelated to KiroAPIKey
+	// KiroAPIKey is a Kiro API key ("ksk_…") used upstream instead of the
+	// kiro-cli database credential. Named after Kiro's own KIRO_API_KEY rather
+	// than the KIROCC_* convention, since it is Kiro's credential, not kirocc's.
+	KiroAPIKey string
+	// Region pins the region used by Kiro runtime and model catalog endpoints,
+	// and is the region targeted in API-key mode (an API key carries no region
+	// of its own). Empty means "use the region resolved from the credential
+	// store", or auth's default in API-key mode.
 	Region string
 	// BaseURL overrides the whole Kiro runtime endpoint, bypassing region-based
 	// URL construction. Empty means "derive from region". Intended for proxies
@@ -57,11 +68,12 @@ type Config struct {
 	// ModelDiscovery enables fetching Kiro's model catalog at startup so newly
 	// launched models resolve without a kirocc release. Built-in mappings always
 	// win; discovery only fills gaps.
-	ModelDiscovery bool
-	Debug          bool
-	OTel           bool
-	OTelBodyLimit  int
-	LogFile        logging.LogFileConfig
+	ModelDiscovery    bool
+	Debug             bool
+	OTel              bool
+	OTelBodyLimit     int
+	KeepAliveInterval time.Duration
+	LogFile           logging.LogFileConfig
 }
 
 // regionPattern matches the region forms Kiro uses ("us-east-1",
@@ -96,6 +108,9 @@ func DefaultDBPathFor(goos, home string) string {
 func ApplyEnvOverrides(cfg *Config) error {
 	applyString("KIROCC_DB_PATH", &cfg.DBPath)
 	applyString("KIROCC_API_KEY", &cfg.APIKey)
+	// Kiro's own variable names, so a machine already set up for headless
+	// kiro-cli needs no kirocc-specific configuration.
+	applyString("KIRO_API_KEY", &cfg.KiroAPIKey)
 	applyString("KIROCC_HOST", &cfg.Host)
 	applyString("KIRO_API_REGION", &cfg.Region)
 	applyString("KIROCC_REGION", &cfg.Region)
@@ -131,6 +146,9 @@ func ApplyEnvOverrides(cfg *Config) error {
 		return err
 	}
 	if err := applyInt("KIROCC_OTEL_BODY_LIMIT", &cfg.OTelBodyLimit); err != nil {
+		return err
+	}
+	if err := applyDuration("KIROCC_KEEPALIVE_INTERVAL", &cfg.KeepAliveInterval); err != nil {
 		return err
 	}
 	applyString("KIROCC_LOG_FILE", &cfg.LogFile.Path)
@@ -182,6 +200,9 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("region must be a lowercase region like us-east-1, got %q", c.Region)
 		}
 	}
+	if c.KeepAliveInterval != 0 && c.KeepAliveInterval < time.Second {
+		return fmt.Errorf("keepalive-interval must be 0 or >= 1s, got %s", c.KeepAliveInterval)
+	}
 	return nil
 }
 
@@ -220,6 +241,17 @@ func applyBool(key string, dst *bool) error {
 			return fmt.Errorf("invalid %s=%q: %w", key, v, err)
 		}
 		*dst = b
+	}
+	return nil
+}
+
+func applyDuration(key string, dst *time.Duration) error {
+	if v := os.Getenv(key); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("invalid %s=%q: %w", key, v, err)
+		}
+		*dst = d
 	}
 	return nil
 }

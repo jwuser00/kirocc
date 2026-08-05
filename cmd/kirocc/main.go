@@ -67,7 +67,16 @@ func run(ctx context.Context, args []string) error {
 		slog.Info("OpenTelemetry tracing enabled", "body_limit", cfg.OTelBodyLimit)
 	}
 
-	authMgr := auth.NewAuthManager(cfg.DBPath, auth.WithRegionOverride(cfg.Region))
+	authMgr := auth.NewAuthManager(cfg.DBPath,
+		auth.WithAPIKey(cfg.KiroAPIKey, cfg.Region),
+		auth.WithRegionOverride(cfg.Region),
+	)
+	if authMgr.UsesAPIKey() {
+		// Say so up front: with a key there is no database read and no refresh,
+		// so the usual "credentials loaded" line never appears and its absence
+		// would otherwise look like a failure.
+		slog.Info("using Kiro API key", "auth_type", auth.AuthTypeAPIKey, "db_read", false)
+	}
 	if cfg.Region != "" {
 		slog.Info("Kiro API region overridden", "region", cfg.Region)
 	}
@@ -115,7 +124,8 @@ func parseFlags(args []string) (config.Config, error) {
 	fs.StringVar(&cfg.Host, "host", "127.0.0.1", "bind host")
 	fs.StringVar(&cfg.DBPath, "db", config.DefaultDBPath(), "kiro-cli SQLite DB path")
 	fs.StringVar(&cfg.APIKey, "api-key", "", "optional API key for authentication")
-	fs.StringVar(&cfg.Region, "region", "", "override the Kiro API region (default: resolved from credentials)")
+	fs.StringVar(&cfg.KiroAPIKey, "kiro-api-key", "", "Kiro API key (ksk_...) to use instead of the kiro-cli database credential; also KIRO_API_KEY")
+	fs.StringVar(&cfg.Region, "region", "", "override the Kiro API region (default: resolved from credentials, or us-east-1 with -kiro-api-key)")
 	fs.StringVar(&cfg.Region, "kiro-api-region", "", "alias for -region; also KIRO_API_REGION")
 	fs.StringVar(&cfg.BaseURL, "base-url", "", "override the Kiro runtime endpoint entirely (default: https://runtime.<region>.kiro.dev/)")
 	fs.Int64Var(&cfg.MaxBodySize, "max-body-size", messages.DefaultMaxBodySize, "max accepted client request body in bytes (0 = unlimited)")
@@ -128,6 +138,7 @@ func parseFlags(args []string) (config.Config, error) {
 	fs.BoolVar(&cfg.Debug, "debug", false, "enable debug logging with OTel JSON Lines output")
 	fs.BoolVar(&cfg.OTel, "otel", false, "enable OpenTelemetry tracing (OTLP HTTP exporter)")
 	fs.IntVar(&cfg.OTelBodyLimit, "otel-body-limit", config.DefaultOTelBodyLimit, "max bytes of request body to capture in OTel spans (0 = unlimited)")
+	fs.DurationVar(&cfg.KeepAliveInterval, "keepalive-interval", config.DefaultKeepAliveInterval, "SSE idle keep-alive interval (0 = disabled)")
 	fs.StringVar(&cfg.LogFile.Path, "log-file", "", "write logs to file with rotation (for agent debugging)")
 	fs.IntVar(&cfg.LogFile.MaxSize, "log-max-size", logging.DefaultLogMaxSize, "max log file size in MB before rotation")
 	fs.IntVar(&cfg.LogFile.MaxBackups, "log-max-backups", logging.DefaultLogMaxBackups, "max number of old log files to retain")
@@ -160,6 +171,9 @@ func buildKiroClient(authMgr *auth.AuthManager, cfg config.Config) kiroclient.Cl
 	}
 	if cfg.Region != "" {
 		clientOpts = append(clientOpts, kiroclient.WithRegion(cfg.Region))
+	}
+	if authMgr.UsesAPIKey() {
+		clientOpts = append(clientOpts, kiroclient.WithAPIKeyAuth())
 	}
 	if cfg.OTel {
 		clientOpts = append(clientOpts, kiroclient.WithOTel(cfg.OTelBodyLimit))
@@ -224,7 +238,7 @@ func discoverModels(ctx context.Context, authMgr *auth.AuthManager, regionOverri
 }
 
 func buildServer(authMgr *auth.AuthManager, client kiroclient.Client, cfg config.Config) *server.Server {
-	var opts []server.ServerOption
+	opts := []server.ServerOption{server.WithKeepAliveInterval(cfg.KeepAliveInterval)}
 	if cfg.OTel {
 		opts = append(opts, server.WithOTel(cfg.OTelBodyLimit))
 	}

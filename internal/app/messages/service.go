@@ -2,6 +2,7 @@ package messages
 
 import (
 	"context"
+	"time"
 
 	"github.com/d-kuro/kirocc/internal/auth"
 	"github.com/d-kuro/kirocc/internal/kiroclient"
@@ -21,6 +22,7 @@ type Service struct {
 	client            kiroclient.Client
 	mcp               kiromcp.Client
 	captureEnabled    bool
+	keepAliveInterval time.Duration
 	maxBodySize       int64
 	historyImageTurns int
 
@@ -85,6 +87,12 @@ func WithWebSearchVisible(v bool) Option {
 
 // webSearchEnabled reports whether Kiro-hosted web search is available.
 func (s *Service) webSearchEnabled() bool { return s.mcp != nil }
+
+// WithKeepAliveInterval sets the idle interval for SSE keep-alive comments.
+// A zero duration disables the heartbeat.
+func WithKeepAliveInterval(interval time.Duration) Option {
+	return func(s *Service) { s.keepAliveInterval = interval }
+}
 
 // New constructs a message service.
 func New(authMgr TokenGetter, client kiroclient.Client, opts ...Option) *Service {
