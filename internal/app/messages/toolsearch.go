@@ -393,8 +393,12 @@ func (o *toolSearchOrchestrator) handleStreaming(ctx context.Context, session *s
 			return ""
 		}
 
-		// The round's redacted reasoning blobs (GPT 5.6) belong to the round, not
-		// to each search, so only the first replayed assistant turn carries them.
+		// Redacted reasoning blobs (GPT 5.6) from a proxy-executed round are not
+		// replayable: buildHistory attributes a blob to the server_tool_use it
+		// sits with and skips those, because the backend has already consumed
+		// that round's reasoning. Carrying them on every search would only
+		// inflate the history payload, so the first replayed assistant turn
+		// takes them and the rest get none.
 		redacted := sw.RedactedContents()
 		for _, ts := range plan.toolSearches {
 			// ToolSearch detected — execute search and emit SSE blocks.
@@ -556,9 +560,12 @@ func (o *toolSearchOrchestrator) handleNonStreaming(ctx context.Context, w http.
 			msgs = appendWebSearchMessages(msgs, textOfContentBlocks(content), calls)
 		}
 
-		// The round's redacted reasoning blobs (GPT 5.6) belong to the round,
-		// not to each search, so only the first replayed assistant turn
-		// carries them.
+		// Redacted reasoning blobs (GPT 5.6) from a proxy-executed round are not
+		// replayable: buildHistory attributes a blob to the server_tool_use it
+		// sits with and skips those, because the backend has already consumed
+		// that round's reasoning. Carrying them on every search would only
+		// inflate the history payload, so the first replayed assistant turn
+		// takes them and the rest get none.
 		redacted := acc.RedactedContents()
 		for _, ts := range plan.toolSearches {
 			// Execute search.
