@@ -43,3 +43,5 @@ Package responsibilities that are not obvious from the name:
 `internal/kiroproto` holds the wire types; field order and `omitempty`/`omitzero` choices mirror observed kiro-cli captures and should not be changed casually. The `/kiro-capture` skill (`.claude/skills/`) captures real kiro-cli traffic when the wire format needs re-verifying.
 
 Behavioral detail (effort/thinking resolution, model mapping table, tool-search query forms, flags and env vars) is documented in `README.md`; release process in `docs/RELEASING.md` and the `/release-kirocc` skill.
+
+This is a fork of `d-kuro/kirocc` (remote `upstream`). Before merging upstream, read `docs/MERGING-UPSTREAM.md` — it records the conflict classes that recur every merge and the resolutions that must not be silently reverted (the API/OIDC region split, the schema guard, redacted-blob replay).
