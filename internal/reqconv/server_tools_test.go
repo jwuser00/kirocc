@@ -87,27 +87,43 @@ func TestIsAnthropicServerTool(t *testing.T) {
 	}
 }
 
-func TestWantsWebSearch_FindsDeferredDeclaration(t *testing.T) {
+func TestWebSearchOptionsFrom_FindsDeferredDeclaration(t *testing.T) {
 	// Claude Code defers WebSearch until the model asks for it, so a request
 	// that is about to need a search carries it only in the deferred map.
 	tsCtx := &toolsearch.Context{
 		DeferredTools: map[string]anthropic.Tool{"WebSearch": webSearchServerTool()},
 	}
-	if !WantsWebSearch(nil, tsCtx) {
-		t.Error("WantsWebSearch = false for deferred declaration, want true")
+	if WebSearchOptionsFrom(nil, tsCtx) == nil {
+		t.Error("WebSearchOptionsFrom = nil for deferred declaration, want options")
 	}
 }
 
-func TestWantsWebSearch_ActiveAndAbsent(t *testing.T) {
+func TestWebSearchOptionsFrom_ActiveAndAbsent(t *testing.T) {
 	active := &toolsearch.Context{ActiveTools: []anthropic.Tool{webSearchServerTool()}}
-	if !WantsWebSearch(nil, active) {
-		t.Error("WantsWebSearch = false for active declaration")
+	if WebSearchOptionsFrom(nil, active) == nil {
+		t.Error("WebSearchOptionsFrom = nil for active declaration")
 	}
-	if WantsWebSearch([]anthropic.Tool{clientTool("Read")}, nil) {
-		t.Error("WantsWebSearch = true with no declaration")
+	if WebSearchOptionsFrom([]anthropic.Tool{clientTool("Read")}, nil) != nil {
+		t.Error("WebSearchOptionsFrom != nil with no declaration")
 	}
-	if !WantsWebSearch([]anthropic.Tool{webSearchServerTool()}, nil) {
-		t.Error("WantsWebSearch = false for plain tool list")
+	if WebSearchOptionsFrom([]anthropic.Tool{webSearchServerTool()}, nil) == nil {
+		t.Error("WebSearchOptionsFrom = nil for plain tool list")
+	}
+}
+
+func TestWebSearchOptionsFrom_CarriesDeclarationOptions(t *testing.T) {
+	decl := webSearchServerTool()
+	decl.MaxUses = 4
+	decl.AllowedDomains = []string{"go.dev", "pkg.go.dev"}
+	opts := WebSearchOptionsFrom([]anthropic.Tool{decl}, nil)
+	if opts == nil {
+		t.Fatal("WebSearchOptionsFrom = nil")
+	}
+	if opts.MaxUses != 4 {
+		t.Errorf("MaxUses = %d, want 4", opts.MaxUses)
+	}
+	if len(opts.AllowedDomains) != 2 || opts.AllowedDomains[0] != "go.dev" {
+		t.Errorf("AllowedDomains = %v", opts.AllowedDomains)
 	}
 }
 

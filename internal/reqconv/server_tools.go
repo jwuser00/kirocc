@@ -46,28 +46,47 @@ func isWebSearchServerTool(t anthropic.Tool) bool {
 	return t.Type != "" && strings.HasPrefix(t.Type, "web_search_")
 }
 
-// WantsWebSearch reports whether the client offered Anthropic's WebSearch tool.
+// WebSearchOptions carries the parts of Anthropic's WebSearch declaration that
+// kirocc honors itself: max_uses caps the per-request query budget, and the
+// domain lists post-filter search results (at most one list is set — the
+// Anthropic API rejects both together, so kirocc doesn't re-validate).
+type WebSearchOptions struct {
+	MaxUses        int
+	AllowedDomains []string
+	BlockedDomains []string
+}
+
+// WebSearchOptionsFrom returns the options of the client's WebSearch
+// declaration, or nil when none was offered.
 //
 // Under tool search the declaration usually starts out deferred — Claude Code
 // only promotes WebSearch once the model asks for it — so the deferred map has
 // to be consulted too. Missing that would leave the orchestrator unarmed on the
 // very requests where a search is about to happen.
-func WantsWebSearch(tools []anthropic.Tool, tsCtx *toolsearch.Context) bool {
-	if slices.ContainsFunc(tools, isWebSearchServerTool) {
-		return true
+func WebSearchOptionsFrom(tools []anthropic.Tool, tsCtx *toolsearch.Context) *WebSearchOptions {
+	if i := slices.IndexFunc(tools, isWebSearchServerTool); i >= 0 {
+		return optionsOf(tools[i])
 	}
 	if tsCtx == nil {
-		return false
+		return nil
 	}
-	if slices.ContainsFunc(tsCtx.ActiveTools, isWebSearchServerTool) {
-		return true
+	if i := slices.IndexFunc(tsCtx.ActiveTools, isWebSearchServerTool); i >= 0 {
+		return optionsOf(tsCtx.ActiveTools[i])
 	}
 	for _, t := range tsCtx.DeferredTools {
 		if isWebSearchServerTool(t) {
-			return true
+			return optionsOf(t)
 		}
 	}
-	return false
+	return nil
+}
+
+func optionsOf(t anthropic.Tool) *WebSearchOptions {
+	return &WebSearchOptions{
+		MaxUses:        t.MaxUses,
+		AllowedDomains: t.AllowedDomains,
+		BlockedDomains: t.BlockedDomains,
+	}
 }
 
 // RewriteServerTools strips Anthropic server-tool declarations from tools and

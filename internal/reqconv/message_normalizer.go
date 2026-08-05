@@ -20,6 +20,7 @@ const (
 // tool content handling runs first (it inspects original block shapes), then
 // role normalization, merging, and alternation fixups.
 func Normalize(msgs []anthropic.Message, hasTools bool) []anthropic.Message {
+	msgs = textualizeWebSearchBlocks(msgs)
 	msgs = textualizeToolContent(msgs, hasTools)
 	msgs = normalizeRoles(msgs)
 	msgs = mergeAdjacentSameRole(msgs)

@@ -15,6 +15,7 @@ Just set `ANTHROPIC_BASE_URL` from any Anthropic API client (e.g., Claude Code) 
 - **Custom API region** — Pin the region in `runtime.<region>.kiro.dev` with `-kiro-api-region`, for accounts whose stored credential region is not one Kiro serves
 - **Extended Thinking** — Enable via the `[1m]` suffix, the `thinking` field, or `output_config.effort`. Reasoning depth travels natively as `additionalModelRequestFields.output_config.effort` (validated against each model's enum; defaults to `medium` for effort-capable models when thinking is on without an explicit effort)
 - **Tool Search** — Proxy-side implementation of Anthropic's [Tool Search Tool](https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool). Supports `tool_search_tool_regex_20251119` and `tool_search_tool_bm25_20251119` with `defer_loading` for on-demand tool discovery
+- **Web Search** — Proxy-side implementation of Anthropic's WebSearch server tool, backed by the Kiro-hosted `web_search`. Parallel multi-query fan-out, result pages fetched and attached as content, searches rendered natively in Claude Code and persisted across turns
 - **Prompt Caching** — Converts Anthropic tool-level `cache_control` to Kiro `cachePoint`
 - **Truncation detection** — Automatically injects a notice into the next request when a response is truncated
 - **Retry** — Exponential backoff retry for 403 (token expiry), 429, and 5xx errors. Also retries responses the user would see as empty: thinking-only ones, and ones whose entire text is the synthetic role-alternation placeholder echoed back
@@ -140,7 +141,10 @@ systemctl --user enable --now kirocc
 | `-model-discovery`         | `true`                    | Fetch Kiro's model catalog at startup                                     |
 | `-max-body-size`           | `134217728`               | Max accepted client request body in bytes (0 = unlimited)                 |
 | `-history-image-turns`     | `2`                       | Earlier user turns that replay their images on the current message        |
-| `-web-search`              | `true`                    | Resolve Claude WebSearch through Kiro's hosted web search                 |
+| `-web-search`              | `true`                    | Resolve Claude WebSearch through Kiro's hosted web search (see below)     |
+| `-web-search-fetch`        | `3`                       | Top result pages downloaded per query, their text attached to results (0 = snippets only) |
+| `-web-search-fetch-bytes`  | `6144`                    | Max bytes of attached page text per fetched result                        |
+| `-web-search-visible`      | `true`                    | Stream searches to the client as `server_tool_use`/`web_search_tool_result` blocks |
 | `-debug`                   | `false`                   | Enable debug logging                                                      |
 | `-log-file`                | (none)                    | Write logs to file with rotation (file-only by default)                   |
 | `-log-max-size`            | `10`                      | Max log file size in MB before rotation                                   |
@@ -242,6 +246,9 @@ Command-line options can be overridden with environment variables.
 | `KIROCC_MAX_BODY_SIZE`        | `-max-body-size`      |
 | `KIROCC_HISTORY_IMAGE_TURNS`  | `-history-image-turns`|
 | `KIROCC_WEB_SEARCH`           | `-web-search`         |
+| `KIROCC_WEB_SEARCH_FETCH`     | `-web-search-fetch`   |
+| `KIROCC_WEB_SEARCH_FETCH_BYTES` | `-web-search-fetch-bytes` |
+| `KIROCC_WEB_SEARCH_VISIBLE`   | `-web-search-visible` |
 | `KIROCC_DEBUG`                | `-debug`              |
 | `KIROCC_LOG_FILE`             | `-log-file`           |
 | `KIROCC_LOG_MAX_SIZE`         | `-log-max-size`       |
@@ -431,6 +438,18 @@ Supported query forms:
 
 - `select:Read,Edit,Grep` — exact tool selection by name
 - `read file` — keyword search (regex with word-level OR fallback, or BM25 scoring)
+
+### Web Search
+
+Anthropic's WebSearch is a server tool: the search runs inside Anthropic's API, which the Kiro backend cannot do. kirocc reproduces the whole pipeline proxy-side, using the `web_search` tool AWS hosts behind the Kiro subscription (same credentials, no extra API key):
+
+1. The client's `web_search_20250305` declaration is swapped for the Kiro-hosted `web_search` tool. `max_uses` and `allowed_domains`/`blocked_domains` from the declaration are honored.
+2. When the model requests a search, kirocc intercepts the tool_use. One call may fan out up to 5 queries (`query` + `additional_queries`), executed in parallel against the MCP endpoint.
+3. Search results are **enriched**: the top `-web-search-fetch` result URLs are downloaded (SSRF-guarded, cached 15 min) and their readable text is attached per result, so the model answers from page content rather than snippets — the substance native WebSearch provides.
+4. In visible mode (default), each search is emitted to the client as `server_tool_use` + `web_search_tool_result` blocks — Anthropic's native shape — so Claude Code renders the search and replays the results on later requests. Fetched page text travels in the `encrypted_content` field, which clients round-trip verbatim; kirocc decodes it back into history on replay, making past search results part of the model's memory in later turns.
+5. Budgets: at most 3 extra Kiro round-trips and 10 queries per client request (lowered by `max_uses`). A failed search returns as a tool error the model can react to, never as a failed request.
+
+`-web-search=false` disables the replacement entirely (the declaration is still stripped, since Kiro rejects schema-less tools).
 
 ### Model mappings
 

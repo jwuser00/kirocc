@@ -43,6 +43,17 @@ type Config struct {
 	// the request either way — Kiro rejects them — so disabling this only gives
 	// up the replacement capability, never request validity.
 	WebSearch bool
+	// WebSearchFetch is how many top search-result pages are downloaded and
+	// their readable text attached to the results the model sees. Zero
+	// disables enrichment (snippets only).
+	WebSearchFetch int
+	// WebSearchFetchBytes caps the attached text per fetched page.
+	WebSearchFetchBytes int
+	// WebSearchVisible emits executed searches to the client as
+	// server_tool_use / web_search_tool_result blocks (Anthropic's native
+	// shape), so Claude Code renders them and replays the results in later
+	// turns. False keeps searches invisible to the client.
+	WebSearchVisible bool
 	// ModelDiscovery enables fetching Kiro's model catalog at startup so newly
 	// launched models resolve without a kirocc release. Built-in mappings always
 	// win; discovery only fills gaps.
@@ -99,6 +110,15 @@ func ApplyEnvOverrides(cfg *Config) error {
 		return err
 	}
 	if err := applyBool("KIROCC_WEB_SEARCH", &cfg.WebSearch); err != nil {
+		return err
+	}
+	if err := applyInt("KIROCC_WEB_SEARCH_FETCH", &cfg.WebSearchFetch); err != nil {
+		return err
+	}
+	if err := applyInt("KIROCC_WEB_SEARCH_FETCH_BYTES", &cfg.WebSearchFetchBytes); err != nil {
+		return err
+	}
+	if err := applyBool("KIROCC_WEB_SEARCH_VISIBLE", &cfg.WebSearchVisible); err != nil {
 		return err
 	}
 	if err := applyBool("KIROCC_MODEL_DISCOVERY", &cfg.ModelDiscovery); err != nil {
