@@ -39,6 +39,7 @@
 	<dict>
 		<key>HOME</key>
 		<string>@HOME@</string>
+@EXTRA_ENV@
 	</dict>
 </dict>
 </plist>

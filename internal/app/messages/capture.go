@@ -50,6 +50,10 @@ type upstreamAttemptCapture struct {
 	toolCount         int
 	toolResultCount   int
 	requestBody       []byte
+	requestBodyLen    int
+	imageCount        int
+	imageBytes        int
+	historyLen        int
 	responseHeader    http.Header
 	events            []upstreamCapturedEvent
 
@@ -85,6 +89,19 @@ func newUpstreamAttemptCapture(ctx context.Context, enabled bool, payload *kirop
 		toolCount = len(current.UserInputMessageContext.Tools)
 		toolResultCount = len(current.UserInputMessageContext.ToolResults)
 	}
+
+	// Size breakdown of what actually goes upstream. Kiro rejects oversized
+	// requests with CONTENT_LENGTH_EXCEEDS_THRESHOLD, and the client-side body
+	// size is not a usable proxy for the cause: history entries carry no images,
+	// so kirocc drops the ones it received and re-attaches only the replay
+	// window to the current message. Recording the outgoing total alongside the
+	// image bytes is what separates "the request was too big" from "the request
+	// was fine and something else was rejected".
+	var imageBytes int
+	for _, img := range current.Images {
+		imageBytes += len(img.Source.Bytes)
+	}
+
 	return &upstreamAttemptCapture{
 		traceID:           traceID,
 		attempt:           attempt,
@@ -96,6 +113,10 @@ func newUpstreamAttemptCapture(ctx context.Context, enabled bool, payload *kirop
 		toolCount:         toolCount,
 		toolResultCount:   toolResultCount,
 		requestBody:       body,
+		requestBodyLen:    len(body),
+		imageCount:        len(current.Images),
+		imageBytes:        imageBytes,
+		historyLen:        len(payload.ConversationState.History),
 		toolUseNames:      make(map[string]int),
 	}
 }
@@ -179,6 +200,10 @@ func (c *upstreamAttemptCapture) logAttrs() []any {
 	return []any{
 		"assistant_response_events", c.assistantResponseEvents,
 		"current_content_len", c.currentContentLen,
+		"upstream_body_len", c.requestBodyLen,
+		"image_count", c.imageCount,
+		"image_bytes", c.imageBytes,
+		"history_len", c.historyLen,
 		"tool_count", c.toolCount,
 		"tool_result_count", c.toolResultCount,
 		"reasoning_events", c.reasoningEvents,
@@ -187,6 +212,24 @@ func (c *upstreamAttemptCapture) logAttrs() []any {
 		"has_visible_text", c.hasVisibleText,
 		"has_real_tool_use", c.hasRealToolUse,
 	}
+}
+
+// maxLoggedRequestBody bounds the captured body in the log. A rejected request
+// can carry megabytes of base64 image data, and repeating that on every failure
+// buries the surrounding log lines and churns through rotation. The size fields
+// in logAttrs already answer "how big was it"; the body itself is only needed to
+// see the shape, which the head of the JSON shows.
+const maxLoggedRequestBody = 64 << 10
+
+// loggableRequestBody returns the captured body, truncated to a size that is
+// still useful to read. Truncated output is emitted as a JSON string rather than
+// raw JSON, since a cut-off object would not parse.
+func (c *upstreamAttemptCapture) loggableRequestBody() any {
+	if len(c.requestBody) <= maxLoggedRequestBody {
+		return jsontext.Value(c.requestBody)
+	}
+	return fmt.Sprintf("%s… (truncated, %d bytes total)",
+		c.requestBody[:maxLoggedRequestBody], len(c.requestBody))
 }
 
 func (c *upstreamAttemptCapture) logCapture(ctx context.Context, reason string) {
@@ -204,7 +247,7 @@ func (c *upstreamAttemptCapture) logCapture(ctx context.Context, reason string) 
 	}
 	args = append(args, c.logAttrs()...)
 	args = append(args,
-		"request_body", jsontext.Value(c.requestBody),
+		"request_body", c.loggableRequestBody(),
 		"response_headers", marshalRaw(c.responseHeader),
 		"events", marshalRaw(c.events),
 	)

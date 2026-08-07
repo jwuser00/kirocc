@@ -36,6 +36,13 @@ func (s *Service) callAndHandle(ctx context.Context, w http.ResponseWriter, sess
 	apiResp, err := s.client.GenerateAssistantResponse(ctx, inv.creds.AccessToken, inv.payload, inv.creds.Region)
 	if err != nil {
 		logUpstreamError(ctx, short, err)
+		// An upstream rejection happens before any event arrives, so the size
+		// and shape of what we sent is the only evidence of why. Without it a
+		// CONTENT_LENGTH_EXCEEDS_THRESHOLD is indistinguishable from any other
+		// 400, and the client-side body size cannot stand in for it — kirocc
+		// drops history images and re-attaches only the replay window, so the
+		// outgoing request is a different size from the one it received.
+		capture.logCapture(ctx, "upstream_call_failed")
 		if session != nil {
 			_ = session.WriteFinalError(newStreamFinalError(http.StatusBadGateway, errTypeAPI, "upstream API error"), nil)
 		} else {

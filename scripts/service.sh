@@ -69,6 +69,28 @@ port_in_use_by_other() {
 
 render_plist() {
 	mkdir -p "$(dirname "$PLIST_DEST")" "$LOG_DIR"
+
+	# Forward selected KIROCC_* variables into the agent's environment. launchd
+	# gives an agent almost no environment of its own, so a variable exported in
+	# the installing shell would otherwise be invisible to the running service.
+	# Listed explicitly rather than passing everything through, so a stray
+	# variable in the shell cannot silently change how the service behaves.
+	#
+	# Values are XML-escaped: KIROCC_MODEL_MAPPINGS carries JSON, and a bare & or
+	# < in it would produce a plist launchd refuses to parse, leaving the agent
+	# dead with only a parse error in launchd.log to explain it.
+	local extra_env="" v esc
+	for v in KIROCC_DEBUG KIROCC_REGION KIROCC_BASE_URL KIROCC_WEB_SEARCH \
+		KIROCC_MODEL_DISCOVERY KIROCC_HISTORY_IMAGE_TURNS KIROCC_MAX_BODY_SIZE \
+		KIROCC_LOG_MAX_SIZE KIROCC_LOG_MAX_BACKUPS KIROCC_MODEL_MAPPINGS; do
+		[[ -n "${!v:-}" ]] || continue
+		esc="${!v//&/&amp;}"
+		esc="${esc//</&lt;}"
+		esc="${esc//>/&gt;}"
+		extra_env+="		<key>$v</key>"$'\n'"		<string>$esc</string>"$'\n'
+		info "forwarding $v to the agent"
+	done
+
 	sed \
 		-e "s|@LABEL@|$LABEL|g" \
 		-e "s|@BINARY@|$BINARY|g" \
@@ -76,7 +98,15 @@ render_plist() {
 		-e "s|@LOGFILE@|$LOG_FILE|g" \
 		-e "s|@LAUNCHD_LOG@|$LAUNCHD_LOG|g" \
 		-e "s|@HOME@|$HOME|g" \
-		"$PLIST_TEMPLATE" >"$PLIST_DEST"
+		"$PLIST_TEMPLATE" >"$PLIST_DEST.tmp"
+
+	# Substitute the env block with awk rather than sed: the replacement is
+	# multi-line, which sed cannot express portably.
+	EXTRA_ENV="$extra_env" awk '
+		/^@EXTRA_ENV@/ { printf "%s", ENVIRON["EXTRA_ENV"]; next }
+		{ print }
+	' "$PLIST_DEST.tmp" >"$PLIST_DEST"
+	rm -f "$PLIST_DEST.tmp"
 }
 
 load_agent() {
